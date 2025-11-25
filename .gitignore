@@ -8,3 +8,6 @@ video_info.csv
 GEMINI.md
 /main/downloads
 *.env
+__pycache__/
+*.pyc
+*.csv
