@@ -6,7 +6,7 @@
 video_info.csv
 *.db
 GEMINI.md
-/main/downloads
+/main/podcast_files
 *.env
 __pycache__/
 *.pyc
