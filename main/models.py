@@ -65,6 +65,8 @@ class PodcastEpisode(db.Base):
     itunes_episodetype = Column(String)
     itunes_explicit = Column(String)
     download_status = Column(String, default='pending')  # e.g. "pending", "downloaded", "failed"
+    transcription_status = Column(String, default='pending')
+    # transcription_status could be: "pending", "deployed", "completed", "failed"
 
     # Foreign keys
     season_id = Column(Integer, ForeignKey("podcast_seasons.id"))
@@ -74,6 +76,7 @@ class PodcastEpisode(db.Base):
     season = relationship("PodcastSeason", back_populates="episodes")
     podcast = relationship("PodcastInfo", back_populates="episodes")
     paths = relationship("PodcastPath", back_populates="episode")
+    job_status = relationship("JobDeployment", back_populates="episode")
 
 class PodcastPath(db.Base):
     __tablename__ = "podcast_paths"
@@ -81,6 +84,7 @@ class PodcastPath(db.Base):
     id = Column(Integer, primary_key=True)
     episode_id = Column(Integer, ForeignKey("podcast_episodes.id"), nullable=False)
     file_path = Column(String, nullable=False, unique=True)
+    file_name = Column(String, nullable=True, default='audio.mp3')
     file_type = Column(String, nullable=False, default='audio')   # e.g. "audio", "transcript", "cleaned"
     created_at = Column(DateTime, default=utcnow)
 
@@ -99,3 +103,24 @@ class RssUrls(db.Base):
     error_message = Column(String, nullable=True)
 
     podcast = relationship("PodcastInfo", back_populates="rss_urls")
+
+class JobDeployment(db.Base):
+    """Tracks job deployments for podcast processing tasks"""
+    # status options:
+    #   pending
+    #   deployed-waiting
+    #   deployed-in_progress
+    #   deployed-completed
+    #   deployed-error
+    #   retrieved
+    #   failed
+    __tablename__ = "job_deployments"
+
+    id = Column(Integer, primary_key=True)
+    epidode_id = Column(Integer, ForeignKey("podcast_episodes.id"), nullable=False)
+    #episode_id = Column(Integer, ForeignKey("podcast_episodes.id"), nullable=False)
+    ulid = Column(String, nullable=False) # Unique job identifier from server
+    deployed_at = Column(DateTime(timezone=True), default=utcnow)
+    job_status = Column(String, default="pending")
+
+    episode = relationship("PodcastEpisode")

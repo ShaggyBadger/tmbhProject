@@ -6,7 +6,10 @@ import re
 import requests
 from tqdm import tqdm
 from db import SessionLocal
-from models import PodcastInfo, PodcastSeason, PodcastEpisode, RssUrls, PodcastPath
+from models import PodcastInfo, PodcastSeason, PodcastEpisode, RssUrls
+from models import PodcastPath, JobDeployment
+from sqlalchemy.orm import selectinload
+from sqlalchemy import or_
 from pathlib import Path
 import time
 from rich.traceback import install
@@ -440,6 +443,7 @@ class PodcastCollection:
             new_path = PodcastPath(
                 episode_id=episode_id,
                 file_path=str(audio_file_path),
+                file_name=str(audio_file_name),
                 file_type="audio"  # assuming audio for now
             )
             session.add(new_path)
@@ -469,6 +473,7 @@ class PodcastDownloader:
         try:
             target_statuses = ['pending', 'failed']
             query = session.query(PodcastEpisode)
+            query = query.options(selectinload(PodcastEpisode.paths)) # Eager load paths
             query = query.filter(PodcastEpisode.download_status.in_(target_statuses))
             pending_episodes = query.all()
             return pending_episodes
@@ -551,23 +556,186 @@ class PodcastDownloader:
             for episode in pending_episodes:
                 self.download_episode(episode)
 
+class DeployPodcastProcessing:
+    '''
+    Docstring for DeployPodcastProcessing
+    
+    This class is a placeholder for deploying podcast processing jobs.
+    '''
+    def __init__(self,
+                 priority_level='low',
+                 fastapi_url="http://192.168.68.66:5000/new-job"
+                 ):
+        self.priority_level = priority_level
+        self.fastapi_url = fastapi_url
+        self.mp3s_to_deploy = self.find_mp3s() # list of mp3 files to deploy
+
+        if len(self.mp3s_to_deploy) == 0:
+            print("No MP3 files found for deployment.")
+
+        else:
+            for episode in self.mp3s_to_deploy:
+                self.deploy_mp3(episode)
+        
+        print('Deployment process complete....')
+    
+    def find_mp3s(self):
+        print("Finding MP3 files to deploy...")
+        session = SessionLocal()
+        mp3_list = []
+
+        try:
+            query = session.query(PodcastEpisode)
+            query = query.options(selectinload(PodcastEpisode.paths)) # Eager load paths
+            query = query.filter(
+                PodcastEpisode.download_status == 'downloaded',
+                or_(
+                    PodcastEpisode.transcription_status == 'pending',
+                    PodcastEpisode.transcription_status == 'failed_deployment'
+                    )
+                )
+            query = query.order_by(PodcastEpisode.id.asc())
+
+            mp3_list = query.all()
+            print(f"Found {len(mp3_list)} MP3 files to deploy.")
+            input('Press Enter to continue...')
+        
+        finally:
+            session.close()
+        
+        return mp3_list
+
+    def deploy_mp3(self, episode):
+        print(f'Deploying processing job for episode: {episode.title}...')
+
+        if not episode.paths:
+            print(f"No file path found for episode: {episode.title}. Skipping deployment.")
+            return
+
+        file_path = Path(episode.paths[0].file_path)
+        file_name = episode.paths[0].file_name
+
+        if not file_path.exists():
+            print(f"File not found at {file_path} for episode: {episode.title}. Skipping deployment.")
+            # TODO : update episode status to indicate missing file
+            return
+
+        try:
+            with open(file_path, 'rb') as f:
+                #  build the multipart form data
+                # first the mp3 file
+                files = {
+                    'file': (file_name, f, 'audio/mpeg')
+                }
+
+                # then the json data
+                data = {
+                    'priority_level': self.priority_level,
+                    'filename': file_name
+                }
+
+                # send it
+                response = requests.post(
+                    self.fastapi_url,
+                    files=files,
+                    data=data
+                )
+                response.raise_for_status()
+                
+                print(f"Successfully deployed {file_name}.")
+                
+                response_data = response.json()
+                job_ulid = response_data.get("job_ulid")
+                job_status_from_server = response_data.get("status") # This should be 'deployed' or similar
+
+                # update the database
+                session = SessionLocal()
+                try:
+                    episode = session.merge(episode)
+                    episode.transcription_status = 'deployed' # Update episode status
+
+                    # Create a new JobDeployment entry
+                    new_job_deployment = JobDeployment(
+                        epidode_id=episode.id,
+                        ulid=job_ulid,
+                        job_status=job_status_from_server
+                    )
+                    session.add(new_job_deployment)
+                    session.commit()
+
+                    print(f"JobDeployment for episode {episode.title} (ULID: {job_ulid}) created successfully.")
+                except Exception as e:
+                    session.rollback()
+                    print(f"Error updating transcription status or creating JobDeployment for {episode.title}: {e}")
+                finally:
+                    session.close()
+
+        except requests.exceptions.RequestException as e:
+            print(f"Network or server error while deploying {file_name}: {e}")
+            session = SessionLocal()
+            try:
+                episode = session.merge(episode)
+                episode.transcription_status = 'failed_deployment'
+                session.commit()
+            except Exception as update_e:
+                session.rollback()
+                print(f"Error updating transcription status after deployment failure for {episode.title}: {update_e}")
+            finally:
+                session.close()
+        except IOError as e:
+            print(f"File system error reading {file_name}: {e}")
+            session = SessionLocal()
+            try:
+                episode = session.merge(episode)
+                episode.transcription_status = 'failed_deployment'
+                session.commit()
+            except Exception as update_e:
+                session.rollback()
+                print(f"Error updating transcription status after file system error for {episode.title}: {update_e}")
+            finally:
+                session.close()
+        except Exception as e:
+            print(f"An unexpected error occurred during deployment of {file_name}: {e}")
+            session = SessionLocal()
+            try:
+                episode = session.merge(episode)
+                episode.transcription_status = 'failed_deployment'
+                session.commit()
+            except Exception as update_e:
+                session.rollback()
+                print(f"Error updating transcription status after unexpected error for {episode.title}: {update_e}")
+            finally:
+                session.close()
+
 if __name__ == "__main__":
     url = "https://feeds.buzzsprout.com/2544823.rss"
 
     options = {
         '1': 'Start podcast collection flow',
-        '2': 'Download Podcast episodes'
+        '2': 'Download Podcast episodes',
+        '3': 'Deploy podcast processing jobs',
+        'q': 'Quit'
     }
 
-    for option in options:
-        print(f"{option}: {options[option]}")
-    
-    choice = input("Enter option number: ").strip()
+    while True:
+        print("\nSelect an option:")
+        for option in options:
+            print(f"{option}: {options[option]}")
+        
+        choice = input("Enter option number: ").strip()
 
-    if choice == '1':
-        collector = PodcastCollection(url)
-        collector.standard_flow()
-    
-    elif choice == '2':
-        downloader = PodcastDownloader()
-        downloader.start_downloads()
+        if choice == '1':
+            collector = PodcastCollection(url)
+            collector.standard_flow()
+        
+        elif choice == '2':
+            downloader = PodcastDownloader()
+            downloader.start_downloads()
+
+        elif choice == '3':
+            # Instantiate and run the deployment process
+            deployer = DeployPodcastProcessing()
+        
+        elif choice.lower() == 'q':
+            print("Exiting the program.")
+            exit(0)
