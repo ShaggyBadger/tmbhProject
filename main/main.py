@@ -6,12 +6,14 @@ import re
 import requests
 from tqdm import tqdm
 from db import SessionLocal
-from models import PodcastInfo, PodcastSeason, PodcastEpisode, RssUrls
+from models import PodcastInfo, PodcastSeason, PodcastEpisode, RssUrls, JobDeployment
 from models import PodcastPath, JobDeployment
 from sqlalchemy.orm import selectinload
 from sqlalchemy import or_
 from pathlib import Path
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.traceback import install
 install(show_locals=True)
 
@@ -707,6 +709,66 @@ class DeployPodcastProcessing:
             finally:
                 session.close()
 
+class RecoverPodcastTranscripts:
+    def __init__(self):
+        self.fastapi_url="http://192.168.68.66:5000"
+        self.ulids_completed = self.query_server_for_completed_jobs()
+    
+    def server_get_request(self, ulid):
+        '''just a method to do get requests. Gonna combine with threading probably'''
+        url = f"{self.fastapi_url}/report-job-status/{ulid}"
+        response = requests.get(url)
+
+        if response.status_code != 200:
+            raise RuntimeError(f"Request failed: {response.status_code} - {response.text}")
+        
+        data = response.json()
+        job_status = data.get('status')
+
+        data_packet = {
+            ulid: job_status
+        }
+
+        return data_packet
+
+    def query_server_for_completed_jobs(self):
+        '''Return a list of ULID's ready to be downloaded from server'''
+        session = SessionLocal()
+
+        try:
+            query = session.query(JobDeployment)
+            query = query.filter(JobDeployment.job_status == 'pending')
+            job_list = query.all()
+
+            ulids = [job.ulid for job in job_list] # make list of ulids
+
+            results = []
+            futures = []
+
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                for ulid in ulids:
+                    future = executor.submit(self.server_get_request, ulid)
+                    futures.append(future)
+
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                        results.append(result)
+                    except Exception as e:
+                        print(f"Job failed: {e}")
+            completed = [job for job in results if job == 'completed']
+    
+        except Exception as e:
+            print(f'exception occured: {e}')
+        finally:
+            session.close()
+        
+        return completed # TODO - this is broken. it just returns a list of strings
+
+
+    def download_completed_job(ulid):
+        pass
+
 if __name__ == "__main__":
     url = "https://feeds.buzzsprout.com/2544823.rss"
 
@@ -714,6 +776,7 @@ if __name__ == "__main__":
         '1': 'Start podcast collection flow',
         '2': 'Download Podcast episodes',
         '3': 'Deploy podcast processing jobs',
+        '4': 'Recover completed transcripts from server',
         'q': 'Quit'
     }
 
@@ -735,6 +798,10 @@ if __name__ == "__main__":
         elif choice == '3':
             # Instantiate and run the deployment process
             deployer = DeployPodcastProcessing()
+        
+        elif choice == '4':
+            # make GET requests for the info and stuff
+            recovery_agent = RecoverPodcastTranscripts()
         
         elif choice.lower() == 'q':
             print("Exiting the program.")
