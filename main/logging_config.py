@@ -1,5 +1,9 @@
 import logging.config
 import colorlog
+import os
+
+# Determine the absolute path for the log file, placing it in the same directory as this script.
+log_file_path = os.path.join(os.path.dirname(__file__), 'app.log')
 
 LOGGING_CONFIG = {
     'version': 1,
@@ -32,7 +36,7 @@ LOGGING_CONFIG = {
             'level': 'DEBUG',
             'formatter': 'standard',
             'class': 'logging.handlers.RotatingFileHandler',
-            'filename': 'app.log',
+            'filename': log_file_path,
             'maxBytes': 10485760,  # 10MB
             'backupCount': 5,
             'encoding': 'utf8',
@@ -41,7 +45,7 @@ LOGGING_CONFIG = {
     'loggers': {
         '': {  # root logger
             'handlers': ['console', 'file'],
-            'level': 'DEBUG',
+            'level': 'INFO',
             'propagate': True,
         },
     }

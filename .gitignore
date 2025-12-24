@@ -12,6 +12,7 @@ __pycache__/
 *.pyc
 *.csv
 *.txt
+*.log
 
 */alembic
 *.ini

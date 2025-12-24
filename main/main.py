@@ -11,9 +11,6 @@ from models import PodcastPath, JobDeployment
 from sqlalchemy.orm import selectinload
 from sqlalchemy import or_
 from pathlib import Path
-import time
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.traceback import install
 import logging
 from logging_config import setup_logging
@@ -336,8 +333,8 @@ class PodcastCollection:
             logger.debug(f"Path for episode ID {episode_id} already exists. Skipping path generation.")
             return existing_path.file_path
 
-        CWD = Path.cwd()
-        PODCAST_FILES_DIR = CWD / "podcast_files"
+        script_dir = Path(__file__).parent.resolve()
+        PODCAST_FILES_DIR = script_dir / "podcast_files"
         PODCAST_FILES_DIR.mkdir(parents=True, exist_ok=True)
 
         rss_entry = session.query(RssUrls).filter_by(rss_url=self.url).first()
@@ -589,135 +586,145 @@ class DeployPodcastProcessing:
             session.close()
 
 class RecoverPodcastTranscripts:
-    """
-    This class is responsible for recovering podcast transcripts from the server.
-    It checks the status of processing jobs that have been previously deployed,
-    downloads the results for completed jobs, and updates the database accordingly.
-    """
-    def __init__(self, fastapi_url="http://192.168.68.66:5000"):
-        """
-        Initializes the recovery agent with the URL of the FastAPI server.
-        """
-        self.fastapi_url = fastapi_url
-        logger.info(f"RecoverPodcastTranscripts initialized for server: {fastapi_url}")
-
-    def run(self):
-        """
-        Main method to orchestrate the transcript recovery process.
-        """
-        logger.info("Starting transcript recovery process...")
-        ulids_to_check = self._get_ulids_to_check()
-
-        if not ulids_to_check:
-            logger.info("No pending jobs to check.")
-            return
-
-        logger.info(f"Checking status for {len(ulids_to_check)} jobs...")
-        completed_ulids = self._check_jobs_concurrently(ulids_to_check)
-
-        if not completed_ulids:
-            logger.info("No jobs have completed yet.")
-            return
-
-        logger.info(f"Found {len(completed_ulids)} completed jobs.")
-        for ulid in completed_ulids:
-            self.process_completed_job(ulid)
+    def __init__(self):
+        self.fastapi_url="http://192.168.68.66:5000"
+        self.ulids_completed = self.query_server_for_completed_jobs()
+        logger.info(f"Found {len(self.ulids_completed)} completed jobs to download.")
         
-        logger.info("Transcript recovery process finished.")
-
-    def _get_ulids_to_check(self):
-        """
-        Gets a list of ULIDs from the database for jobs that are not yet
-        in a terminal state (e.g., 'completed', 'failed').
-        """
-        session = SessionLocal()
-        try:
-            active_statuses = ['deployed', 'pending', 'processing']
-            query = session.query(JobDeployment.ulid)
-            query = query.filter(JobDeployment.job_status.in_(active_statuses))
-            ulids = [row.ulid for row in query.all()]
-            logger.debug(f"Found {len(ulids)} active jobs to check.")
-            return ulids
-        except Exception as e:
-            logger.error(f"Error querying database for jobs to check: {e}", exc_info=True)
-            return []
-        finally:
-            session.close()
-
-    def _check_jobs_concurrently(self, ulids):
-        """
-        Uses a thread pool to check the status of multiple jobs concurrently.
-        Returns a list of ULIDs for jobs that have a 'completed' status.
-        """
-        completed_ulids = []
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_ulid = {executor.submit(self._check_job_status, ulid): ulid for ulid in ulids}
-            
-            for future in tqdm(as_completed(future_to_ulid), total=len(ulids), desc="Checking job statuses"):
-                ulid = future_to_ulid[future]
-                try:
-                    status = future.result()
-                    if status == 'completed':
-                        logger.info(f"Job {ulid} reported as 'completed' by server.")
-                        completed_ulids.append(ulid)
-                        self.update_job_status_in_db(ulid, 'completed')
-                except Exception as e:
-                    logger.error(f"\nAn error occurred while checking ULID {ulid}: {e}", exc_info=True)
-        return completed_ulids
+        if self.ulids_completed:
+            for ulid in self.ulids_completed:
+                self.download_completed_job(ulid)
     
-    def _check_job_status(self, ulid):
-        """
-        Makes a GET request to the server to check a single job's status.
-        Returns the job status string.
-        """
+    def check_job_status(self, ulid):
+        '''just a method to do get requests. Gonna combine with threading probably'''
         url = f"{self.fastapi_url}/report-job-status/{ulid}"
         try:
             response = requests.get(url)
             response.raise_for_status()
             data = response.json()
-            logger.debug(f"Status for job {ulid} is '{data.get('status')}'.")
             return data.get('status')
         except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"Request for {ulid} failed: {e}") from e
+            logger.error(f"Error checking status for ULID {ulid}: {e}")
+            return None
 
-    def process_completed_job(self, ulid):
-        """
-        Processes a single completed job.
-        """
-        logger.info(f"Processing completed job: {ulid}")
-        self.download_transcript(ulid)
+    def query_server_for_completed_jobs(self):
+        '''Return a list of ULID's ready to be downloaded from server'''
+        session = SessionLocal()
+        logger.info("Querying for completed jobs...")
 
-    def download_transcript(self, ulid):
-        """
-        (Placeholder) Downloads the transcript for a given ULID.
-        """
-        logger.info(f"Downloading transcript for {ulid}... (Not yet implemented)")
-        pass
+        try:
+            query = session.query(JobDeployment)
+            query = query.filter(JobDeployment.job_status.in_(["pending", "deployed"]))
+            job_list = query.all()
 
-    def update_job_status_in_db(self, ulid, new_status):
-        """
-        Updates the status of a job and the corresponding episode in the database.
-        """
+            ulids = [job.ulid for job in job_list] # make list of ulids
+            logger.info(f"Found {len(ulids)} pending jobs to check.")
+
+            completed_ulids = []
+
+            for ulid in ulids:
+                status = self.check_job_status(ulid)
+
+                if status == 'completed':
+                    # also update the job status in the database
+                    job = session.query(JobDeployment).filter(JobDeployment.ulid == ulid).first()
+                    if job:
+                        job.job_status = 'completed'
+                        session.commit()
+
+                    completed_ulids.append(ulid)
+            
+            return completed_ulids
+    
+        except Exception as e:
+            logger.error(f'Exception occurred while querying for jobs: {e}', exc_info=True)
+            return []
+        finally:
+            session.close()
+    
+    def download_completed_job(self, ulid):
+        '''Downloads a transcript, saves it, and updates the database.'''
+        logger.info(f"Downloading transcript for job ULID: {ulid}")
         session = SessionLocal()
         try:
-            job = session.query(JobDeployment).filter(JobDeployment.ulid == ulid).first()
+            # 1. Find the Job and related Episode/Paths
+            # start the query
+            query = session.query(JobDeployment)
+
+            # add eager-loading options
+            query = query.options(
+                selectinload(JobDeployment.episode)
+                    .selectinload(PodcastEpisode.paths)
+            )
+
+            # apply filters
+            query = query.filter(JobDeployment.ulid == ulid)
+
+            # execute
+            job = query.first()
+
+
             if not job:
-                logger.warning(f"Job with ULID {ulid} not found in database for update.")
+                logger.error(f"Job with ULID {ulid} not found in the database.")
                 return
 
-            logger.info(f"Updating job {ulid} status to '{new_status}' in the database.")
-            job.job_status = new_status
+            if not job.episode or not job.episode.paths:
+                logger.error(f"Episode or path info missing for job ULID {ulid}.")
+                return
+
+            # 2. Determine the transcript path
+            audio_path = Path(job.episode.paths[0].file_path)
+            transcript_path = audio_path.parent / f"{audio_path.stem}.txt"
+            logger.debug(f"Determined transcript path: {transcript_path}")
+
+            # 3. Download the transcript
+            download_url = f"{self.fastapi_url}/retrieve-job/{ulid}"
+            try:
+                response = requests.get(download_url)
+                response.raise_for_status()
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Failed to download transcript for ULID {ulid}: {e}")
+                job.job_status = 'download_failed'
+                session.commit()
+                return
+
+            # 4. Save the file
+            try:
+                transcript_path.parent.mkdir(parents=True, exist_ok=True)
+                transcript_path.write_text(response.text, encoding='utf-8')
+                logger.info(f"Transcript for {ulid} saved to {transcript_path}")
+            except IOError as e:
+                logger.error(f"Failed to write transcript to disk for ULID {ulid}: {e}")
+                job.job_status = 'download_failed'
+                session.commit()
+                return
+
+            # 5. Update the database
+            # Create a new PodcastPath for the transcript
+            new_path = PodcastPath(
+                episode_id=job.episode.id,
+                file_path=str(transcript_path),
+                file_name=transcript_path.name,
+                file_type='transcript'
+            )
+            session.add(new_path)
+            logger.debug(f"Created new PodcastPath entry for transcript: {transcript_path.name}")
+
+            # Update JobDeployment status
+            job.job_status = 'retrieved'
+            logger.debug(f"Updated JobDeployment status to 'retrieved' for ULID {ulid}")
             
-            episode = session.query(PodcastEpisode).filter(PodcastEpisode.id == job.epidode_id).first()
-            if episode:
-                episode.transcription_status = 'completed'
-            else:
-                logger.warning(f"Could not find related episode for job {ulid}.")
-            
+            # Update PodcastEpisode status
+            episode = job.episode
+            episode.transcription_status = 'completed'
+            logger.debug(f"Updated PodcastEpisode '{episode.title}' transcription_status to 'completed'.")
+
             session.commit()
+            logger.info(f"Successfully processed and updated database for job {ulid}.")
+
         except Exception as e:
+            logger.error(f'An unexpected error occurred during download process for {ulid}: {e}', exc_info=True)
             session.rollback()
-            logger.error(f"Error updating database for job {ulid}: {e}", exc_info=True)
         finally:
             session.close()
 
@@ -734,6 +741,7 @@ if __name__ == "__main__":
     }
 
     while True:
+        logger.info('\n*****Program initiated*****')
         print("\nSelect an option:")
         for option in options:
             print(f"{option}: {options[option]}")
@@ -753,7 +761,6 @@ if __name__ == "__main__":
         
         elif choice == '4':
             recovery_agent = RecoverPodcastTranscripts()
-            recovery_agent.run()
         
         elif choice.lower() == 'q':
             logger.info("User chose to quit. Exiting program.")
