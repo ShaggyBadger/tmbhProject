@@ -13,6 +13,7 @@ __pycache__/
 *.csv
 *.txt
 *.log
+*.json
 
 */alembic
 *.ini
