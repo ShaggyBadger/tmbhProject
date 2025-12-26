@@ -19,7 +19,7 @@ from rich.traceback import install
 import logging
 from logging_config import setup_logging
 from datetime import datetime, timezone
-from transcriptProcessing import TranscriptProcessor
+from transcriptProcessing import GeminiProcessor, OllamaProcessor
 
 install(show_locals=False)
 logger = logging.getLogger(__name__)
@@ -761,165 +761,145 @@ class RecoverPodcastTranscripts:
         finally:
             session.close()
 
-class PostProcessTranscripts:
-    def __init__(self, require_authorization=False):
-        logger.info(f'Initiating PostProcessTranscripts...')
+def gemini_worker_func():
+    """Worker thread for processing transcripts with Gemini."""
+    logger.info("Gemini worker thread started.")
+    while True:
+        session = SessionLocal()
+        try:
+            # Find one pending episode
+            post_job = session.query(PostProcessingStatus).join(
+                PodcastPath, PostProcessingStatus.episode_id == PodcastPath.episode_id
+            ).filter(
+                PostProcessingStatus.status == 'pending',
+                PodcastPath.file_type == 'transcript'
+            ).first()
 
-        # flag to let us know we can continue processing episodes or not
-        self.program_status = 'continue'
-
-        # get list of episode id's we need to do post processing on
-        self.episodes_to_process = self._collect_epidodes()
-        logger.info(f"Found {len(self.episodes_to_process)} episodes to process.")
-
-        # 
-
-        # start sending them to be processed
-        for episode_id in self.episodes_to_process:
-            if self.program_status == 'continue':
-                self.process_episode(episode_id)
-            else:
-                logger.info(f'Ending the process, looks like we hit gemini quota')
+            if not post_job:
+                logger.info("No more pending episodes for Gemini. Worker shutting down.")
                 break
 
-        logger.info('Post-processing run complete.')
-
-    def spinner(self, stop_event):
-        dots = 0
-        while not stop_event.is_set():
-            dots = (dots + 1) % 4   # 0,1,2,3,0...
-            sys.stdout.write("\rProcessing" + "." * dots + "   ")
-            sys.stdout.flush()
-            time.sleep(0.5)
-
-        # clean final line
-        sys.stdout.write("\rProcessing complete!    \n")
-        sys.stdout.flush()
-
-    def _collect_epidodes(self):
-        '''
-        returns a list of episode id's from PostProcesingStatus that need to be
-        processed.
-        '''
-        session = SessionLocal()
-
-        try:
-            logger.info("Collecting episodes to process...")
-            query = session.query(PostProcessingStatus)
-            query = query.filter(PostProcessingStatus.status != 'completed')
-            results = query.all()
-
-            id_list = [i.episode_id for i in results] # get just the episode id's
-            logger.info(f"Found {len(id_list)} episodes with status not equal to 'completed'.")
-            return id_list
-
-            # print(len(results))
-            # print(results[0])
-            # a = results[0]
-            # print(a.episode)
-            # b = a.episode
-            # print(b)
-            # print(b.paths)
-            # paths = b.paths
-            # print(len(paths))
-            # c = paths[0]
-            # print(c.file_path)
-
-        except Exception as e:
-            logger.error(f'Something happened in the _collect_episodes method of the PostProcessTranscripts class: {e}')
-            # Return an empty list in case of an error to prevent NoneType iteration
-            return []
-        finally:
-            session.close()
-
-    def _run_processing(self, stop_event, transcript_path, result_container):
-        try:
-            processor = TranscriptProcessor()
-            result = processor.standard_flow(transcript_path)
-            result_container["result"] = result
-        except Exception as e:
-            result_container["error"] = e
-        finally:
-            stop_event.set()  # used to tell the threads we are done
-
-    def process_episode(self, episode_id):
-        logger.info(f"--- Starting post-processing for episode_id: {episode_id} ---")
-        session = SessionLocal()
-
-        try:
-            # get the relevant row
-            query = session.query(PostProcessingStatus)
-            query = query.filter(PostProcessingStatus.episode_id == episode_id)
-            post_processing_status = query.first()
-
-            # get transcript path
-            query = session.query(PodcastPath)
-            query = query.filter(PodcastPath.episode_id == episode_id)
-            query = query.filter(PodcastPath.file_type == 'transcript')
-            transcript_path_obj = query.first()
+            logger.info(f"[Gemini] Processing episode_id: {post_job.episode_id}")
             
-            if not transcript_path_obj:
-                logger.error(f"Transcript path not found in database for episode_id: {episode_id}. Skipping.")
-                post_processing_status.status = 'error_missing_transcript'
+            # Find the transcript path
+            transcript_path_obj = session.query(PodcastPath).filter(
+                PodcastPath.episode_id == post_job.episode_id,
+                PodcastPath.file_type == 'transcript'
+            ).first()
+
+            if not transcript_path_obj or not Path(transcript_path_obj.file_path).exists():
+                logger.error(f"[Gemini] Transcript not found for episode_id: {post_job.episode_id}. Setting status to 'error'.")
+                post_job.status = 'error_missing_transcript'
                 session.commit()
-                return
+                continue
 
             transcript_path = Path(transcript_path_obj.file_path)
-            logger.info(f"Found transcript at: {transcript_path}")
-
-            if not transcript_path.exists():
-                logger.error(f"Transcript file not found on disk at: {transcript_path}. Skipping.")
-                post_processing_status.status = 'error_missing_transcript'
-                session.commit()
-                return
-
-            stop_event = threading.Event()
-            result_container = {}
-
-            worker = threading.Thread(
-                target=self._run_processing,
-                args=(stop_event, transcript_path, result_container),
-                daemon=True
-            )
-
-            status = threading.Thread(
-                target=self.spinner,
-                args=(stop_event,),
-                daemon=True
-            )
             
-            logger.info("Starting worker and status threads...")
-            worker.start()
-            status.start()
+            # Process with Gemini
+            gemini_processor = GeminiProcessor()
+            status = gemini_processor.format_transcript(transcript_path)
 
-            worker.join()
-            status.join()
-            logger.info("Threads have completed.")
-
-            # handle result
-            if "error" in result_container:
-                # The error is raised from the thread, log it and let the exception block handle it
-                raise result_container["error"]
-
-            processing_status = result_container.get("result", {})
-
-            if processing_status.get("status") == "good":
-                logger.info(f"Processing for episode {episode_id} successful. Updating status to 'completed'.")
-                post_processing_status.status = "completed"
+            if status == 'good':
+                post_job.status = 'gemini_complete'
+                logger.info(f"[Gemini] Successfully processed episode_id: {post_job.episode_id}. Status set to 'gemini_complete'.")
+            elif status == 'out of quota':
+                logger.warning("[Gemini] Quota exceeded. Worker shutting down.")
+                post_job.status = 'pending_quota_exceeded'
+                session.commit()
+                break # Exit loop on quota error
             else:
-                status_from_processor = processing_status.get('status', 'unknown')
-                logger.warning(f"Stopping run due to processing status: '{status_from_processor}'. Setting program_status to 'stop'.")
-                self.program_status = "stop"
-                post_processing_status.status = f'error_{status_from_processor}'
-
+                post_job.status = 'error_gemini'
+            
             session.commit()
 
         except Exception as e:
-            session.rollback()
-            # Use logger.exception to include traceback information automatically
-            logger.exception(f"An unexpected error occurred in process_episode for episode_id: {episode_id}")
+            logger.exception(f"[Gemini] An unexpected error occurred in the Gemini worker.")
+            if 'session' in locals() and session.is_active:
+                session.rollback()
         finally:
-            session.close()
+            if 'session' in locals():
+                session.close()
+
+def ollama_worker_func():
+    """Worker thread for processing transcripts with Ollama."""
+    logger.info("Ollama worker thread started.")
+    while True:
+        session = SessionLocal()
+        try:
+            # Find one episode marked as 'gemini_complete'
+            post_job = session.query(PostProcessingStatus).filter(
+                PostProcessingStatus.status == 'gemini_complete'
+            ).first()
+
+            if not post_job:
+                logger.info("No more 'gemini_complete' episodes for Ollama. Worker will check again later.")
+                time.sleep(10) # Wait before checking again
+                # check if the other thread is alive
+                gemini_thread_alive = any(t.name == 'GeminiThread' and t.is_alive() for t in threading.enumerate())
+                if not gemini_thread_alive:
+                    logger.info("Gemini thread is no longer active. Shutting down Ollama worker.")
+                    break
+                else:
+                    continue
+            
+            logger.info(f"[Ollama] Processing episode_id: {post_job.episode_id}")
+
+            # Find the FORMATTED transcript path
+            transcript_path_obj = session.query(PodcastPath).filter(
+                PodcastPath.episode_id == post_job.episode_id,
+                PodcastPath.file_type == 'transcript'
+            ).first()
+
+            if not transcript_path_obj:
+                logger.error(f"[Ollama] Original transcript path not found for episode_id: {post_job.episode_id}. Setting status to 'error'.")
+                post_job.status = 'error_missing_transcript'
+                session.commit()
+                continue
+            
+            formatted_transcript_path = Path(transcript_path_obj.file_path).with_name(
+                Path(transcript_path_obj.file_path).stem + "_formatted.txt"
+            )
+
+            if not formatted_transcript_path.exists():
+                logger.error(f"[Ollama] Formatted transcript not found for episode_id: {post_job.episode_id} at {formatted_transcript_path}. Setting status to 'error_missing_formatted_file'.")
+                post_job.status = 'error_missing_formatted_file'
+                session.commit()
+                continue
+
+            # Process with Ollama
+            ollama_processor = OllamaProcessor()
+            ollama_processor.generate_metadata(formatted_transcript_path)
+            
+            post_job.status = 'completed'
+            post_job.completed_at = utcnow()
+            logger.info(f"[Ollama] Successfully processed episode_id: {post_job.episode_id}. Status set to 'completed'.")
+            session.commit()
+
+        except Exception as e:
+            logger.exception(f"[Ollama] An unexpected error occurred in the Ollama worker.")
+            if 'session' in locals() and session.is_active:
+                session.rollback()
+        finally:
+            if 'session' in locals():
+                session.close()
+
+class ProcessingPipeline:
+    def __init__(self):
+        logger.info("Initializing automated processing pipeline...")
+        self.gemini_thread = threading.Thread(target=gemini_worker_func, name="GeminiThread")
+        self.ollama_thread = threading.Thread(target=ollama_worker_func, name="OllamaThread")
+
+    def start(self):
+        logger.info("Starting Gemini and Ollama worker threads.")
+        self.gemini_thread.start()
+        self.ollama_thread.start()
+
+        self.gemini_thread.join()
+        logger.info("Gemini worker thread has finished.")
+        self.ollama_thread.join()
+        logger.info("Ollama worker thread has finished.")
+        
+        logger.info("Automated processing pipeline complete.")
 
 if __name__ == "__main__":
     setup_logging()
@@ -930,7 +910,7 @@ if __name__ == "__main__":
         '2': 'Download Podcast episodes',
         '3': 'Deploy podcast processing jobs',
         '4': 'Recover completed transcripts from server',
-        '5': 'Initiate Post Processing Protocol',
+        '5': 'Start Automated Processing Pipeline',
         'q': 'Quit'
     }
 
@@ -957,7 +937,8 @@ if __name__ == "__main__":
             recovery_agent = RecoverPodcastTranscripts()
         
         elif choice == '5':
-            processor = PostProcessTranscripts()
+            pipeline = ProcessingPipeline()
+            pipeline.start()
         
         elif choice.lower() == 'q':
             logger.info("User chose to quit. Exiting program.")
