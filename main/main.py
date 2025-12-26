@@ -1,22 +1,32 @@
 from curses.ascii import RS
 import json
 from encodings.punycode import T
+from typing import final
 import feedparser
+import sys
+import time
+import threading
 import re
 import requests
 from tqdm import tqdm
 from db import SessionLocal
 from models import PodcastInfo, PodcastSeason, PodcastEpisode, RssUrls, JobDeployment
-from models import PodcastPath, JobDeployment
+from models import PodcastPath, JobDeployment, PostProcessingStatus
 from sqlalchemy.orm import selectinload
 from sqlalchemy import or_
 from pathlib import Path
 from rich.traceback import install
 import logging
 from logging_config import setup_logging
+from datetime import datetime, timezone
+from transcriptProcessing import TranscriptProcessor
 
-install(show_locals=True)
+install(show_locals=False)
 logger = logging.getLogger(__name__)
+
+# Helper function to get current UTC time
+def utcnow():
+    return datetime.now(timezone.utc)
 
 class PodcastCollection:
     '''
@@ -728,6 +738,189 @@ class RecoverPodcastTranscripts:
         finally:
             session.close()
 
+    def update_post_processing(self, ulid):
+        session = SessionLocal()
+
+        try:
+            # get episode id
+            query = session.query(JobDeployment)
+            query = query.filter(JobDeployment.ulid == ulid)
+            entry = query.first()
+
+            episode_id = entry.epidode_id
+
+            # enter row into PostProcessTranscripts
+            new_row = PostProcessingStatus(
+                episode_id = episode_id,
+                status = 'pending'
+            )
+            session.add(new_row)
+            session.commit()
+        except Exception as e:
+            logger.error(f'Something happened iwth updating postProcessing table: {e}')
+        finally:
+            session.close()
+
+class PostProcessTranscripts:
+    def __init__(self, require_authorization=False):
+        logger.info(f'Initiating PostProcessTranscripts...')
+
+        # flag to let us know we can continue processing episodes or not
+        self.program_status = 'continue'
+
+        # get list of episode id's we need to do post processing on
+        self.episodes_to_process = self._collect_epidodes()
+        logger.info(f"Found {len(self.episodes_to_process)} episodes to process.")
+
+        # 
+
+        # start sending them to be processed
+        for episode_id in self.episodes_to_process:
+            if self.program_status == 'continue':
+                self.process_episode(episode_id)
+            else:
+                logger.info(f'Ending the process, looks like we hit gemini quota')
+                break
+
+        logger.info('Post-processing run complete.')
+
+    def spinner(self, stop_event):
+        dots = 0
+        while not stop_event.is_set():
+            dots = (dots + 1) % 4   # 0,1,2,3,0...
+            sys.stdout.write("\rProcessing" + "." * dots + "   ")
+            sys.stdout.flush()
+            time.sleep(0.5)
+
+        # clean final line
+        sys.stdout.write("\rProcessing complete!    \n")
+        sys.stdout.flush()
+
+    def _collect_epidodes(self):
+        '''
+        returns a list of episode id's from PostProcesingStatus that need to be
+        processed.
+        '''
+        session = SessionLocal()
+
+        try:
+            logger.info("Collecting episodes to process...")
+            query = session.query(PostProcessingStatus)
+            query = query.filter(PostProcessingStatus.status != 'completed')
+            results = query.all()
+
+            id_list = [i.episode_id for i in results] # get just the episode id's
+            logger.info(f"Found {len(id_list)} episodes with status not equal to 'completed'.")
+            return id_list
+
+            # print(len(results))
+            # print(results[0])
+            # a = results[0]
+            # print(a.episode)
+            # b = a.episode
+            # print(b)
+            # print(b.paths)
+            # paths = b.paths
+            # print(len(paths))
+            # c = paths[0]
+            # print(c.file_path)
+
+        except Exception as e:
+            logger.error(f'Something happened in the _collect_episodes method of the PostProcessTranscripts class: {e}')
+            # Return an empty list in case of an error to prevent NoneType iteration
+            return []
+        finally:
+            session.close()
+
+    def _run_processing(self, stop_event, transcript_path, result_container):
+        try:
+            processor = TranscriptProcessor()
+            result = processor.standard_flow(transcript_path)
+            result_container["result"] = result
+        except Exception as e:
+            result_container["error"] = e
+        finally:
+            stop_event.set()  # used to tell the threads we are done
+
+    def process_episode(self, episode_id):
+        logger.info(f"--- Starting post-processing for episode_id: {episode_id} ---")
+        session = SessionLocal()
+
+        try:
+            # get the relevant row
+            query = session.query(PostProcessingStatus)
+            query = query.filter(PostProcessingStatus.episode_id == episode_id)
+            post_processing_status = query.first()
+
+            # get transcript path
+            query = session.query(PodcastPath)
+            query = query.filter(PodcastPath.episode_id == episode_id)
+            query = query.filter(PodcastPath.file_type == 'transcript')
+            transcript_path_obj = query.first()
+            
+            if not transcript_path_obj:
+                logger.error(f"Transcript path not found in database for episode_id: {episode_id}. Skipping.")
+                post_processing_status.status = 'error_missing_transcript'
+                session.commit()
+                return
+
+            transcript_path = Path(transcript_path_obj.file_path)
+            logger.info(f"Found transcript at: {transcript_path}")
+
+            if not transcript_path.exists():
+                logger.error(f"Transcript file not found on disk at: {transcript_path}. Skipping.")
+                post_processing_status.status = 'error_missing_transcript'
+                session.commit()
+                return
+
+            stop_event = threading.Event()
+            result_container = {}
+
+            worker = threading.Thread(
+                target=self._run_processing,
+                args=(stop_event, transcript_path, result_container),
+                daemon=True
+            )
+
+            status = threading.Thread(
+                target=self.spinner,
+                args=(stop_event,),
+                daemon=True
+            )
+            
+            logger.info("Starting worker and status threads...")
+            worker.start()
+            status.start()
+
+            worker.join()
+            status.join()
+            logger.info("Threads have completed.")
+
+            # handle result
+            if "error" in result_container:
+                # The error is raised from the thread, log it and let the exception block handle it
+                raise result_container["error"]
+
+            processing_status = result_container.get("result", {})
+
+            if processing_status.get("status") == "good":
+                logger.info(f"Processing for episode {episode_id} successful. Updating status to 'completed'.")
+                post_processing_status.status = "completed"
+            else:
+                status_from_processor = processing_status.get('status', 'unknown')
+                logger.warning(f"Stopping run due to processing status: '{status_from_processor}'. Setting program_status to 'stop'.")
+                self.program_status = "stop"
+                post_processing_status.status = f'error_{status_from_processor}'
+
+            session.commit()
+
+        except Exception as e:
+            session.rollback()
+            # Use logger.exception to include traceback information automatically
+            logger.exception(f"An unexpected error occurred in process_episode for episode_id: {episode_id}")
+        finally:
+            session.close()
+
 if __name__ == "__main__":
     setup_logging()
     url = "https://feeds.buzzsprout.com/2544823.rss"
@@ -737,6 +930,7 @@ if __name__ == "__main__":
         '2': 'Download Podcast episodes',
         '3': 'Deploy podcast processing jobs',
         '4': 'Recover completed transcripts from server',
+        '5': 'Initiate Post Processing Protocol',
         'q': 'Quit'
     }
 
@@ -761,6 +955,9 @@ if __name__ == "__main__":
         
         elif choice == '4':
             recovery_agent = RecoverPodcastTranscripts()
+        
+        elif choice == '5':
+            processor = PostProcessTranscripts()
         
         elif choice.lower() == 'q':
             logger.info("User chose to quit. Exiting program.")

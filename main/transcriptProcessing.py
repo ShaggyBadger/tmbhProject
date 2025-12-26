@@ -5,7 +5,7 @@ import os
 import shlex
 from multiprocessing import process
 from pathlib import Path
-
+import threading
 import subprocess
 import paramiko
 from dotenv import load_dotenv
@@ -51,6 +51,7 @@ class TranscriptProcessor:
         self.ssh_password = os.getenv("SSH_PASSWORD")
         self.ssh_port = int(os.getenv("SSH_PORT", 22))
         self.model = model
+        self.gemini_status = 'good' # to track Gemini API status
         logger.info("TranscriptProcessor initialized with model: %s", self.model)
 
         # build paths to the prompts
@@ -63,11 +64,30 @@ class TranscriptProcessor:
         # make instance of this class, then feed this method the path to the 
         # transcript and let it run through the full process
 
+        self.gemini_status = 'good' # Reset status for the new run
+
         # first build a nice formated version of the script
-        self._format_text(transcript_path)
+        # self._format_text(transcript_path)
+        t1 = threading.Thread(target=self._format_text, args=(transcript_path,))
 
         # next, build the json file with all the metadata  in it.
-        self.process_and_save(transcript_path)
+        # self.process_and_save(transcript_path)
+        t2 = threading.Thread(target=self.process_and_save, args=(transcript_path,))
+
+        # start threads
+        logger.info('Beginning threads for LLM calls...')
+        t1.start()
+        t2.start()
+
+        # wait for both to finish
+        t1.join()
+        t2.join()
+        logger.info('Threads complete. LLM calls complted.')
+
+        if self.gemini_status == 'out of quota': #TODO: work on the reset time
+            return {'status': 'out of quota', 'reset_time': 'tomorrow'}
+        else:
+            return {'status': self.gemini_status}
 
     def _validate_credentials(self):
         """
@@ -297,12 +317,12 @@ class TranscriptProcessor:
                 
             except GeminiQuotaExceededError as e:
                 logger.error(f"Gemini quota exceeded: {e}")
-                # Decide if you want to retry on quota errors or just stop.
-                # For now, we'll stop.
+                self.gemini_status = 'out of quota'
                 return
             except Exception as e:
                 logger.error(f'Ran into an error trying to format the text block {transcript_path.name}: {e}')
-                attempt_number += 1
+                self.gemini_status = 'error'
+                return
             
         output_path = transcript_path.with_name(
             transcript_path.stem + "_formatted" + transcript_path.suffix

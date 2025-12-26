@@ -5,7 +5,7 @@ from alembic.config import Config
 from datetime import datetime, timezone
 from main import PodcastCollection
 from db import SessionLocal
-from models import PodcastEpisode, PodcastPath
+from models import PodcastEpisode, PodcastPath, PostProcessingStatus
 
 class DbManagement:
     """

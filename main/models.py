@@ -77,6 +77,7 @@ class PodcastEpisode(db.Base):
     podcast = relationship("PodcastInfo", back_populates="episodes")
     paths = relationship("PodcastPath", back_populates="episode")
     job_status = relationship("JobDeployment", back_populates="episode")
+    post_processing_status = relationship('PostProcessingStatus', back_populates='episode')
 
 class PodcastPath(db.Base):
     __tablename__ = "podcast_paths"
@@ -124,3 +125,18 @@ class JobDeployment(db.Base):
     job_status = Column(String, default="pending")
 
     episode = relationship("PodcastEpisode")
+
+class PostProcessingStatus(db.Base):
+    __tablename__ = 'post_processing_status'
+
+    id = Column(Integer, primary_key=True)
+    episode_id = Column(Integer, ForeignKey("podcast_episodes.id"), nullable=False)
+    status = Column(String, default='pending')
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Relationship
+    episode = relationship('PodcastEpisode', back_populates='post_processing_status')
