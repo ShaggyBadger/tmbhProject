@@ -487,7 +487,7 @@ class DeployPodcastProcessing:
     '''
     def __init__(self,
                  priority_level='low',
-                 fastapi_url="http://192.168.68.66:5000/new-job"
+                 fastapi_url="http://192.168.68.58:5000/new-job"
                  ):
         self.priority_level = priority_level
         self.fastapi_url = fastapi_url
@@ -597,7 +597,7 @@ class DeployPodcastProcessing:
 
 class RecoverPodcastTranscripts:
     def __init__(self):
-        self.fastapi_url="http://192.168.68.66:5000"
+        self.fastapi_url="http://192.168.68.58:5000"
         self.ulids_completed = self.query_server_for_completed_jobs()
         logger.info(f"Found {len(self.ulids_completed)} completed jobs to download.")
         
