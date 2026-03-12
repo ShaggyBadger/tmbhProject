@@ -7,19 +7,21 @@ from main import PodcastCollection
 from db import SessionLocal
 from models import PodcastEpisode, PodcastPath, PostProcessingStatus
 
+
 class DbManagement:
     """
     A class for managing the database. Provides a simple
     command-line interface to apply migrations, generate new
     migration scripts, and other DB tasks.
     """
+
     def __init__(self):
         self.options = {
             "1": self.initialize_database,
             "2": self.make_migrations,
             "3": self.run_migrations,
             "4": self.build_season_names,
-            "q": self.quit_program
+            "q": self.quit_program,
         }
         self.menu()
 
@@ -38,6 +40,7 @@ class DbManagement:
     def get_alembic_config(self):
         """Load the Alembic config."""
         from pathlib import Path
+
         config_path = Path(__file__).parent / "alembic.ini"
         return Config(str(config_path))
 
@@ -68,16 +71,17 @@ class DbManagement:
     def quit_program(self):
         print("Exiting database management.")
         sys.exit()
-    
+
     def update_rss_url(self):
         """Update RSS URL status and last checked time."""
         pass  # Implementation would go here
-    
+
     def build_season_names(self):
         """Build season names from episode titles."""
         pc = PodcastCollection()
         pc.save_season_names()
         print("Season names built and saved.")
+
 
 if __name__ == "__main__":
     DbManagement()

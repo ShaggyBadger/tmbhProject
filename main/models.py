@@ -2,12 +2,16 @@ import db
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
+
+
 # Helper function to get current UTC time
 def utcnow():
     return datetime.now(timezone.utc)
 
+
 class PodcastInfo(db.Base):
     """Holds general podcast metadata parsed from RSS feed"""
+
     __tablename__ = "podcast_info"
 
     id = Column(Integer, primary_key=True)
@@ -28,8 +32,10 @@ class PodcastInfo(db.Base):
     episodes = relationship("PodcastEpisode", back_populates="podcast")
     rss_urls = relationship("RssUrls", back_populates="podcast")
 
+
 class PodcastSeason(db.Base):
     """Holds podcast season information parsed from RSS feed"""
+
     __tablename__ = "podcast_seasons"
 
     id = Column(Integer, primary_key=True)
@@ -40,8 +46,10 @@ class PodcastSeason(db.Base):
     podcast = relationship("PodcastInfo", back_populates="seasons")
     episodes = relationship("PodcastEpisode", back_populates="season")
 
+
 class PodcastEpisode(db.Base):
     """Holds podcast episode information parsed from RSS feed"""
+
     __tablename__ = "podcast_episodes"
 
     id = Column(Integer, primary_key=True)
@@ -56,7 +64,7 @@ class PodcastEpisode(db.Base):
     author = Column(String)
     author_detail = Column(JSON)
     links = Column(JSON)
-    guid = Column(String, unique=True, index=True) # stored as 'id' in feedparser
+    guid = Column(String, unique=True, index=True)  # stored as 'id' in feedparser
     guidislink = Column(String)
     link = Column(String)
     published = Column(String)
@@ -64,8 +72,10 @@ class PodcastEpisode(db.Base):
     itunes_duration = Column(String)
     itunes_episodetype = Column(String)
     itunes_explicit = Column(String)
-    download_status = Column(String, default='pending')  # e.g. "pending", "downloaded", "failed"
-    transcription_status = Column(String, default='pending')
+    download_status = Column(
+        String, default="pending"
+    )  # e.g. "pending", "downloaded", "failed"
+    transcription_status = Column(String, default="pending")
     # transcription_status could be: "pending", "deployed", "completed", "failed"
 
     # Foreign keys
@@ -77,7 +87,10 @@ class PodcastEpisode(db.Base):
     podcast = relationship("PodcastInfo", back_populates="episodes")
     paths = relationship("PodcastPath", back_populates="episode")
     job_status = relationship("JobDeployment", back_populates="episode")
-    post_processing_status = relationship('PostProcessingStatus', back_populates='episode')
+    post_processing_status = relationship(
+        "PostProcessingStatus", back_populates="episode"
+    )
+
 
 class PodcastPath(db.Base):
     __tablename__ = "podcast_paths"
@@ -85,12 +98,15 @@ class PodcastPath(db.Base):
     id = Column(Integer, primary_key=True)
     episode_id = Column(Integer, ForeignKey("podcast_episodes.id"), nullable=False)
     file_path = Column(String, nullable=False, unique=True)
-    file_name = Column(String, nullable=True, default='audio.mp3')
-    file_type = Column(String, nullable=False, default='audio')   # e.g. "audio", "transcript", "cleaned"
+    file_name = Column(String, nullable=True, default="audio.mp3")
+    file_type = Column(
+        String, nullable=False, default="audio"
+    )  # e.g. "audio", "transcript", "cleaned"
     created_at = Column(DateTime, default=utcnow)
 
     # relationship
     episode = relationship("PodcastEpisode", back_populates="paths")
+
 
 class RssUrls(db.Base):
     __tablename__ = "rss_urls"
@@ -105,8 +121,10 @@ class RssUrls(db.Base):
 
     podcast = relationship("PodcastInfo", back_populates="rss_urls")
 
+
 class JobDeployment(db.Base):
     """Tracks job deployments for podcast processing tasks"""
+
     # status options:
     #   pending
     #   deployed-waiting
@@ -119,19 +137,20 @@ class JobDeployment(db.Base):
 
     id = Column(Integer, primary_key=True)
     epidode_id = Column(Integer, ForeignKey("podcast_episodes.id"), nullable=False)
-    #episode_id = Column(Integer, ForeignKey("podcast_episodes.id"), nullable=False)
-    ulid = Column(String, nullable=False) # Unique job identifier from server
+    # episode_id = Column(Integer, ForeignKey("podcast_episodes.id"), nullable=False)
+    ulid = Column(String, nullable=False)  # Unique job identifier from server
     deployed_at = Column(DateTime(timezone=True), default=utcnow)
     job_status = Column(String, default="pending")
 
     episode = relationship("PodcastEpisode")
 
+
 class PostProcessingStatus(db.Base):
-    __tablename__ = 'post_processing_status'
+    __tablename__ = "post_processing_status"
 
     id = Column(Integer, primary_key=True)
     episode_id = Column(Integer, ForeignKey("podcast_episodes.id"), nullable=False)
-    status = Column(String, default='pending')
+    status = Column(String, default="pending")
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), default=utcnow)
@@ -139,4 +158,4 @@ class PostProcessingStatus(db.Base):
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
     # Relationship
-    episode = relationship('PodcastEpisode', back_populates='post_processing_status')
+    episode = relationship("PodcastEpisode", back_populates="post_processing_status")

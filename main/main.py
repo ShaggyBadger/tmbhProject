@@ -20,32 +20,40 @@ import logging
 from logging_config import setup_logging
 from datetime import datetime, timezone
 from transcriptProcessing import GeminiProcessor, OllamaProcessor
+from processor.services.controller import PipelineController
 
 install(show_locals=False)
 logger = logging.getLogger(__name__)
+
 
 # Helper function to get current UTC time
 def utcnow():
     return datetime.now(timezone.utc)
 
+
 class PodcastCollection:
-    '''
+    """
     Docstring for PodcastCollection
-    
+
     This class handles the collection and storage of podcast data from an RSS feed.
     It uses the feedparser library to parse the RSS feed and SQLAlchemy to interact
     with the database.
-    '''
+    """
+
     def __init__(self, url="https://feeds.buzzsprout.com/2544823.rss"):
         logger.info(f"Initializing PodcastCollection with URL: {url}")
         self.url = url
-        self.parsed = feedparser.parse(url) # Parsed feed
-        self.feed = self.parsed.feed # FeedParserDict with general podcast info
-        self.podcast_info = self.extract_podcast_metadata() # Dict with podcast metadata
-        self.podcast_entries = self.parsed.entries # List of podcast episodes (FeedParserDicts)
-        self.podcast_entries.reverse() # Reverse to process from oldest to newest
+        self.parsed = feedparser.parse(url)  # Parsed feed
+        self.feed = self.parsed.feed  # FeedParserDict with general podcast info
+        self.podcast_info = (
+            self.extract_podcast_metadata()
+        )  # Dict with podcast metadata
+        self.podcast_entries = (
+            self.parsed.entries
+        )  # List of podcast episodes (FeedParserDicts)
+        self.podcast_entries.reverse()  # Reverse to process from oldest to newest
         logger.info(f"Found {len(self.podcast_entries)} episodes in the feed.")
-    
+
     def standard_flow(self):
         # run this method to extract and store podcast info from the feed
         logger.info("Starting standard podcast collection flow...")
@@ -95,37 +103,41 @@ class PodcastCollection:
         return podcast_info
 
     def save_podcast_metadata(self, session):
-        '''
+        """
         Extract general podcast info from the feed and save to the database.
         This is not for individual episiodes, but the overall podcast metadata.
-        '''
-        
+        """
+
         logger.info("Checking for existing podcast info in the database...")
         query = session.query(PodcastInfo)
         query = query.filter_by(title=self.podcast_info.get("title"))
         existing_podcast = query.first()
 
         if existing_podcast:
-                logger.info("Podcast info already exists in the database.")
-                return existing_podcast
+            logger.info("Podcast info already exists in the database.")
+            return existing_podcast
 
         try:
             logger.info("Adding new podcast info to the database...")
             new_podcast = PodcastInfo(**self.podcast_info)
             session.add(new_podcast)
             session.commit()
-            logger.info(f"Podcast info for '{new_podcast.title}' added to the database with ID {new_podcast.id}.")
+            logger.info(
+                f"Podcast info for '{new_podcast.title}' added to the database with ID {new_podcast.id}."
+            )
             return new_podcast
-            
+
         except Exception as e:
             session.rollback()
-            logger.error(f"Error occurred while adding podcast info: {e}", exc_info=True)
+            logger.error(
+                f"Error occurred while adding podcast info: {e}", exc_info=True
+            )
             return None
-                
+
     def save_rss_url(self, session, podcast_metadata):
         # ensure the RSS feed URL is saved to the database
         url = self.url
-        
+
         try:
             if not podcast_metadata:
                 logger.error("Podcast metadata not provided. Cannot save RSS URL.")
@@ -140,7 +152,7 @@ class PodcastCollection:
             if existing_rss:
                 logger.info(f"RSS URL '{url}' already exists in the database.")
                 return
-            
+
             logger.info(f"Entering RSS URL '{url}' into the database...")
             new_rss = RssUrls(rss_url=url, podcast_id=podcast_id)
             session.add(new_rss)
@@ -152,15 +164,15 @@ class PodcastCollection:
             logger.error(f"Error occurred while saving RSS URL: {e}", exc_info=True)
 
     def save_season_names(self):
-        '''
+        """
         So this is a weird one. I don't want to run it every time because it will
         keep asking about the oddball episodes. This will have to be run manually
         when needed.
-        '''
+        """
         logger.info("Starting process to save season names.")
         season_names = []
         oddballs = []
-        
+
         for entry in self.podcast_entries:
             title = entry.title
             match = re.match(r"([A-Z]+)\d+", title)
@@ -168,27 +180,31 @@ class PodcastCollection:
                 season_name = match.group(1)
                 if season_name not in season_names:
                     season_names.append(season_name)
-                    logger.debug(f"Found season name '{season_name}' from title: {title}")
+                    logger.debug(
+                        f"Found season name '{season_name}' from title: {title}"
+                    )
             else:
                 oddballs.append(title)
                 logger.debug(f"Found oddball title (no season match): {title}")
-        
+
         if oddballs:
             logger.info(f"Found {len(oddballs)} oddball episodes to categorize.")
             for oddball in oddballs:
-                print('\n*********************\n')
+                print("\n*********************\n")
                 for i, season in enumerate(season_names, start=1):
                     print(f"{i}: {season}")
                 print(f"\nOddball episode title: {oddball}\n")
 
                 while True:
                     user_input = input("Enter number or new season name: ").strip()
-                    
+
                     if user_input.isdigit():
                         idx = int(user_input) - 1
                         if 0 <= idx < len(season_names):
                             chosen_season = season_names[idx]
-                            logger.info(f"User assigned '{oddball}' to existing season '{chosen_season}'.")
+                            logger.info(
+                                f"User assigned '{oddball}' to existing season '{chosen_season}'."
+                            )
                             break
                         else:
                             print("Invalid number. Try again.")
@@ -196,30 +212,42 @@ class PodcastCollection:
                         chosen_season = user_input
                         if chosen_season not in season_names:
                             season_names.append(chosen_season)
-                            logger.info(f"User created new season '{chosen_season}' for '{oddball}'.")
+                            logger.info(
+                                f"User created new season '{chosen_season}' for '{oddball}'."
+                            )
                         else:
-                            logger.info(f"User assigned '{oddball}' to existing season '{chosen_season}'.")
+                            logger.info(
+                                f"User assigned '{oddball}' to existing season '{chosen_season}'."
+                            )
                         break
                     else:
                         print("Input cannot be empty. Try again.")
 
                 print(f"Episode '{oddball}' assigned to season '{chosen_season}'")
-        
+
         logger.info(f"Identified seasons for saving: {season_names}")
-        input('Press Enter to confirm and save these seasons to the database...')
+        input("Press Enter to confirm and save these seasons to the database...")
         session = SessionLocal()
         try:
             for season_name in season_names:
-                existing_season = session.query(PodcastSeason).filter_by(code=season_name).first()
+                existing_season = (
+                    session.query(PodcastSeason).filter_by(code=season_name).first()
+                )
 
                 if existing_season:
-                    logger.info(f"Season '{season_name}' already exists in the database.")
+                    logger.info(
+                        f"Season '{season_name}' already exists in the database."
+                    )
                     continue
-                
-                podcast_info = session.query(PodcastInfo).filter_by(title=self.feed.title).first()
+
+                podcast_info = (
+                    session.query(PodcastInfo).filter_by(title=self.feed.title).first()
+                )
 
                 if not podcast_info:
-                    logger.error("Podcast info not found in the database. Cannot save season.")
+                    logger.error(
+                        "Podcast info not found in the database. Cannot save season."
+                    )
                     continue
 
                 logger.info(f"Saving season '{season_name}' to the database...")
@@ -229,7 +257,10 @@ class PodcastCollection:
                 logger.info(f"Season '{season_name}' saved to the database.")
         except Exception as e:
             session.rollback()
-            logger.error(f"Error occurred while saving season '{season_name}': {e}", exc_info=True)
+            logger.error(
+                f"Error occurred while saving season '{season_name}': {e}",
+                exc_info=True,
+            )
         finally:
             session.close()
 
@@ -259,24 +290,34 @@ class PodcastCollection:
 
     def select_episode_season(self, session, episode_info, podcast_id):
         seasons = session.query(PodcastSeason).filter_by(podcast_id=podcast_id).all()
-        
+
         title = episode_info.get("title")
         match = re.match(r"([A-Z]+)\d+", title)
 
         if match:
             season_name = match.group(1)
-            season_entry = session.query(PodcastSeason).filter_by(code=season_name, podcast_id=podcast_id).first()
+            season_entry = (
+                session.query(PodcastSeason)
+                .filter_by(code=season_name, podcast_id=podcast_id)
+                .first()
+            )
 
             if season_entry:
-                episode_info['season_id'] = season_entry.id
-                logger.debug(f"Automatically matched episode '{title}' to season '{season_name}'.")
+                episode_info["season_id"] = season_entry.id
+                logger.debug(
+                    f"Automatically matched episode '{title}' to season '{season_name}'."
+                )
                 return season_entry.id
             else:
-                logger.critical(f"Season '{season_name}' extracted from episode '{title}' but not found in database. Exiting.")
+                logger.critical(
+                    f"Season '{season_name}' extracted from episode '{title}' but not found in database. Exiting."
+                )
                 exit(1)
 
-        logger.warning(f"Could not determine season for episode '{title}'. Manual selection required.")
-        print('\n*********************\n')
+        logger.warning(
+            f"Could not determine season for episode '{title}'. Manual selection required."
+        )
+        print("\n*********************\n")
         print(f"Episode title: {title}\n")
         links = episode_info.get("links", [])[0]
         print(f"Episode link: {links.get('href', 'N/A')}\n")
@@ -288,7 +329,7 @@ class PodcastCollection:
 
         while True:
             user_input = input("Enter number for this episode: ").strip()
-            
+
             if user_input.isdigit():
                 idx = int(user_input) - 1
                 if 0 <= idx < len(seasons):
@@ -299,13 +340,15 @@ class PodcastCollection:
             else:
                 print("Invalid entry. Please try again...")
 
-        logger.info(f"User assigned episode '{title}' to season '{chosen_season.code}'.")
+        logger.info(
+            f"User assigned episode '{title}' to season '{chosen_season.code}'."
+        )
         return chosen_season.id
 
     def save_episodes(self, session, episode_info):
         guid = episode_info.get("guid")
         existing_episode = session.query(PodcastEpisode).filter_by(guid=guid).first()
-        title = episode_info.get('title')
+        title = episode_info.get("title")
 
         if existing_episode:
             logger.debug(f"Episode '{title}' (GUID: {guid}) already exists. Skipping.")
@@ -320,7 +363,7 @@ class PodcastCollection:
 
             if podcast_id:
                 new_episode.podcast_id = podcast_id
-            
+
             season_id = self.select_episode_season(session, episode_info, podcast_id)
             new_episode.season_id = season_id
 
@@ -338,9 +381,13 @@ class PodcastCollection:
             return None
 
     def build_episode_paths(self, session, episode_info, episode_id):
-        existing_path = session.query(PodcastPath).filter_by(episode_id=episode_id).first()
+        existing_path = (
+            session.query(PodcastPath).filter_by(episode_id=episode_id).first()
+        )
         if existing_path:
-            logger.debug(f"Path for episode ID {episode_id} already exists. Skipping path generation.")
+            logger.debug(
+                f"Path for episode ID {episode_id} already exists. Skipping path generation."
+            )
             return existing_path.file_path
 
         script_dir = Path(__file__).parent.resolve()
@@ -351,22 +398,24 @@ class PodcastCollection:
         podcast_id = rss_entry.podcast_id
 
         if not podcast_id:
-            logger.error(f"Podcast ID not found for RSS URL {self.url}. Cannot build episode paths.")
+            logger.error(
+                f"Podcast ID not found for RSS URL {self.url}. Cannot build episode paths."
+            )
             return
 
-        cleaned_name = re.sub(r'\W+', '_', self.podcast_info.get('title').lower())
+        cleaned_name = re.sub(r"\W+", "_", self.podcast_info.get("title").lower())
         PODCAST_DIR = PODCAST_FILES_DIR / f"{podcast_id}_{cleaned_name}"
         PODCAST_DIR.mkdir(parents=True, exist_ok=True)
 
         season_id = episode_info.get("season_id")
         season_entry = session.query(PodcastSeason).filter_by(id=season_id).first()
         season_name = season_entry.code if season_entry else "unknown_season"
-        cleaned_season_name = re.sub(r'\W+', '_', season_name.lower())
+        cleaned_season_name = re.sub(r"\W+", "_", season_name.lower())
         SEASON_DIR = PODCAST_DIR / f"{cleaned_season_name}"
         SEASON_DIR.mkdir(parents=True, exist_ok=True)
 
         episode_title = episode_info.get("title", "untitled_episode")
-        cleaned_episode_title = re.sub(r'\W+', '_', episode_title.lower())
+        cleaned_episode_title = re.sub(r"\W+", "_", episode_title.lower())
         EPISODE_DIR = SEASON_DIR / f"{episode_id}_{cleaned_episode_title}"
         EPISODE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -379,30 +428,36 @@ class PodcastCollection:
                 episode_id=episode_id,
                 file_path=str(audio_file_path),
                 file_name=str(audio_file_name),
-                file_type="audio"
+                file_type="audio",
             )
             session.add(new_path)
             session.commit()
             logger.debug(f"Episode path for '{episode_title}' saved.")
         except Exception as e:
             session.rollback()
-            logger.error(f"Error saving episode path for '{episode_title}': {e}", exc_info=True)
+            logger.error(
+                f"Error saving episode path for '{episode_title}': {e}", exc_info=True
+            )
 
         return audio_file_path
-        
+
+
 class PodcastDownloader:
-    '''
+    """
     This class handles downloading podcast episodes given their metadata
     and file paths.
-    '''
+    """
+
     def get_pending_downloads(self):
         """
         Query the database for all episodes with a 'pending' or 'failed' download status.
         """
         session = SessionLocal()
         try:
-            target_statuses = ['pending', 'failed']
-            logger.info(f"Querying for episodes with download status in {target_statuses}")
+            target_statuses = ["pending", "failed"]
+            logger.info(
+                f"Querying for episodes with download status in {target_statuses}"
+            )
             query = session.query(PodcastEpisode)
             query = query.options(selectinload(PodcastEpisode.paths))
             query = query.filter(PodcastEpisode.download_status.in_(target_statuses))
@@ -419,13 +474,13 @@ class PodcastDownloader:
         session = SessionLocal()
         try:
             episode = session.merge(episode)
-            
+
             download_url = episode.link
             file_path = Path(episode.paths[0].file_path)
 
             if not download_url:
                 logger.warning(f"Skipping {episode.title} - No download URL found.")
-                episode.download_status = 'failed'
+                episode.download_status = "failed"
                 session.commit()
                 return
 
@@ -433,19 +488,19 @@ class PodcastDownloader:
             file_path.parent.mkdir(parents=True, exist_ok=True)
 
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36"
             }
 
             with requests.get(download_url, stream=True, headers=headers) as r:
                 r.raise_for_status()
-                total_size = int(r.headers.get('content-length', 0))
-                
-                with open(file_path, 'wb') as f, tqdm(
+                total_size = int(r.headers.get("content-length", 0))
+
+                with open(file_path, "wb") as f, tqdm(
                     total=total_size,
-                    unit='iB',
+                    unit="iB",
                     unit_scale=True,
                     unit_divisor=1024,
-                    desc=episode.title[:40]
+                    desc=episode.title[:40],
                 ) as progress_bar:
                     for chunk in r.iter_content(chunk_size=8192):
                         if chunk:
@@ -454,17 +509,19 @@ class PodcastDownloader:
 
             downloaded_size = file_path.stat().st_size
             if total_size != 0 and downloaded_size < total_size:
-                logger.warning(f"Incomplete download: {episode.title}. Expected {total_size}, got {downloaded_size}")
-                episode.download_status = 'failed'
+                logger.warning(
+                    f"Incomplete download: {episode.title}. Expected {total_size}, got {downloaded_size}"
+                )
+                episode.download_status = "failed"
             else:
-                episode.download_status = 'downloaded'
+                episode.download_status = "downloaded"
                 logger.info(f"Finished download: {episode.title}")
 
             session.commit()
 
         except Exception as e:
             logger.error(f"Error downloading {episode.title}: {e}", exc_info=True)
-            episode.download_status = 'failed'
+            episode.download_status = "failed"
             session.commit()
         finally:
             session.close()
@@ -474,21 +531,22 @@ class PodcastDownloader:
         Orchestrates the downloading of pending podcast episodes sequentially.
         """
         pending_episodes = self.get_pending_downloads()
-        
+
         if not pending_episodes:
             logger.info("No episodes are pending download.")
         else:
             for episode in pending_episodes:
                 self.download_episode(episode)
 
+
 class DeployPodcastProcessing:
-    '''
+    """
     This class handles deploying podcast processing jobs.
-    '''
-    def __init__(self,
-                 priority_level='low',
-                 fastapi_url="http://192.168.68.58:5000/new-job"
-                 ):
+    """
+
+    def __init__(
+        self, priority_level="low", fastapi_url="http://192.168.68.58:5000/new-job"
+    ):
         self.priority_level = priority_level
         self.fastapi_url = fastapi_url
         self.mp3s_to_deploy = self.find_mp3s()
@@ -498,9 +556,9 @@ class DeployPodcastProcessing:
         else:
             for episode in self.mp3s_to_deploy:
                 self.deploy_mp3(episode)
-        
-        logger.info('Deployment process complete.')
-    
+
+        logger.info("Deployment process complete.")
+
     def find_mp3s(self):
         logger.info("Finding MP3 files to deploy...")
         session = SessionLocal()
@@ -508,47 +566,51 @@ class DeployPodcastProcessing:
             query = session.query(PodcastEpisode)
             query = query.options(selectinload(PodcastEpisode.paths))
             query = query.filter(
-                PodcastEpisode.download_status == 'downloaded',
+                PodcastEpisode.download_status == "downloaded",
                 or_(
-                    PodcastEpisode.transcription_status == 'pending',
-                    PodcastEpisode.transcription_status == 'failed_deployment'
-                    )
-                )
+                    PodcastEpisode.transcription_status == "pending",
+                    PodcastEpisode.transcription_status == "failed_deployment",
+                ),
+            )
             query = query.order_by(PodcastEpisode.id.asc())
 
             mp3_list = query.all()
             if mp3_list:
                 logger.info(f"Found {len(mp3_list)} MP3 files to deploy.")
-                input('Press Enter to continue...')
+                input("Press Enter to continue...")
             return mp3_list
         finally:
             session.close()
-    
+
     def deploy_mp3(self, episode):
-        logger.info(f'Deploying processing job for episode: {episode.title}...')
+        logger.info(f"Deploying processing job for episode: {episode.title}...")
 
         if not episode.paths:
-            logger.warning(f"No file path found for episode: {episode.title}. Skipping deployment.")
+            logger.warning(
+                f"No file path found for episode: {episode.title}. Skipping deployment."
+            )
             return
 
         file_path = Path(episode.paths[0].file_path)
         file_name = episode.paths[0].file_name
 
         if not file_path.exists():
-            logger.error(f"File not found at {file_path} for episode: {episode.title}. Skipping deployment.")
+            logger.error(
+                f"File not found at {file_path} for episode: {episode.title}. Skipping deployment."
+            )
             # TODO : update episode status to indicate missing file
             return
 
         try:
-            with open(file_path, 'rb') as f:
-                files = {'file': (file_name, f, 'audio/mpeg')}
-                data = {'priority_level': self.priority_level, 'filename': file_name}
+            with open(file_path, "rb") as f:
+                files = {"file": (file_name, f, "audio/mpeg")}
+                data = {"priority_level": self.priority_level, "filename": file_name}
 
                 response = requests.post(self.fastapi_url, files=files, data=data)
                 response.raise_for_status()
-                
+
                 logger.info(f"Successfully deployed {file_name}.")
-                
+
                 response_data = response.json()
                 job_ulid = response_data.get("job_ulid")
                 job_status_from_server = response_data.get("status")
@@ -556,31 +618,38 @@ class DeployPodcastProcessing:
                 session = SessionLocal()
                 try:
                     episode = session.merge(episode)
-                    episode.transcription_status = 'deployed'
+                    episode.transcription_status = "deployed"
 
                     new_job_deployment = JobDeployment(
                         epidode_id=episode.id,
                         ulid=job_ulid,
-                        job_status=job_status_from_server
+                        job_status=job_status_from_server,
                     )
                     session.add(new_job_deployment)
                     session.commit()
-                    logger.info(f"JobDeployment for episode {episode.title} (ULID: {job_ulid}) created with status '{job_status_from_server}'.")
+                    logger.info(
+                        f"JobDeployment for episode {episode.title} (ULID: {job_ulid}) created with status '{job_status_from_server}'."
+                    )
                 except Exception as e:
                     session.rollback()
-                    logger.error(f"DB Error for {episode.title} post-deployment: {e}", exc_info=True)
+                    logger.error(
+                        f"DB Error for {episode.title} post-deployment: {e}",
+                        exc_info=True,
+                    )
                 finally:
                     session.close()
 
         except requests.exceptions.RequestException as e:
             logger.error(f"Network error deploying {file_name}: {e}", exc_info=True)
-            self.update_episode_status_on_failure(episode, 'failed_deployment')
+            self.update_episode_status_on_failure(episode, "failed_deployment")
         except IOError as e:
             logger.error(f"File error for {file_name}: {e}", exc_info=True)
-            self.update_episode_status_on_failure(episode, 'failed_deployment')
+            self.update_episode_status_on_failure(episode, "failed_deployment")
         except Exception as e:
-            logger.critical(f"Unexpected error deploying {file_name}: {e}", exc_info=True)
-            self.update_episode_status_on_failure(episode, 'failed_deployment')
+            logger.critical(
+                f"Unexpected error deploying {file_name}: {e}", exc_info=True
+            )
+            self.update_episode_status_on_failure(episode, "failed_deployment")
 
     def update_episode_status_on_failure(self, episode, status):
         session = SessionLocal()
@@ -591,34 +660,38 @@ class DeployPodcastProcessing:
             logger.info(f"Updated episode {episode.title} status to '{status}'.")
         except Exception as e:
             session.rollback()
-            logger.error(f"Failed to update episode status for {episode.title} after error: {e}", exc_info=True)
+            logger.error(
+                f"Failed to update episode status for {episode.title} after error: {e}",
+                exc_info=True,
+            )
         finally:
             session.close()
 
+
 class RecoverPodcastTranscripts:
     def __init__(self):
-        self.fastapi_url="http://192.168.68.58:5000"
+        self.fastapi_url = "http://192.168.68.58:5000"
         self.ulids_completed = self.query_server_for_completed_jobs()
         logger.info(f"Found {len(self.ulids_completed)} completed jobs to download.")
-        
+
         if self.ulids_completed:
             for ulid in self.ulids_completed:
                 self.download_completed_job(ulid)
-    
+
     def check_job_status(self, ulid):
-        '''just a method to do get requests. Gonna combine with threading probably'''
+        """just a method to do get requests. Gonna combine with threading probably"""
         url = f"{self.fastapi_url}/report-job-status/{ulid}"
         try:
             response = requests.get(url)
             response.raise_for_status()
             data = response.json()
-            return data.get('status')
+            return data.get("status")
         except requests.exceptions.RequestException as e:
             logger.error(f"Error checking status for ULID {ulid}: {e}")
             return None
 
     def query_server_for_completed_jobs(self):
-        '''Return a list of ULID's ready to be downloaded from server'''
+        """Return a list of ULID's ready to be downloaded from server"""
         session = SessionLocal()
         logger.info("Querying for completed jobs...")
 
@@ -627,7 +700,7 @@ class RecoverPodcastTranscripts:
             query = query.filter(JobDeployment.job_status.in_(["pending", "deployed"]))
             job_list = query.all()
 
-            ulids = [job.ulid for job in job_list] # make list of ulids
+            ulids = [job.ulid for job in job_list]  # make list of ulids
             logger.info(f"Found {len(ulids)} pending jobs to check.")
 
             completed_ulids = []
@@ -635,25 +708,31 @@ class RecoverPodcastTranscripts:
             for ulid in ulids:
                 status = self.check_job_status(ulid)
 
-                if status == 'completed':
+                if status == "completed":
                     # also update the job status in the database
-                    job = session.query(JobDeployment).filter(JobDeployment.ulid == ulid).first()
+                    job = (
+                        session.query(JobDeployment)
+                        .filter(JobDeployment.ulid == ulid)
+                        .first()
+                    )
                     if job:
-                        job.job_status = 'completed'
+                        job.job_status = "completed"
                         session.commit()
 
                     completed_ulids.append(ulid)
-            
+
             return completed_ulids
-    
+
         except Exception as e:
-            logger.error(f'Exception occurred while querying for jobs: {e}', exc_info=True)
+            logger.error(
+                f"Exception occurred while querying for jobs: {e}", exc_info=True
+            )
             return []
         finally:
             session.close()
-    
+
     def download_completed_job(self, ulid):
-        '''Downloads a transcript, saves it, and updates the database.'''
+        """Downloads a transcript, saves it, and updates the database."""
         logger.info(f"Downloading transcript for job ULID: {ulid}")
         session = SessionLocal()
         try:
@@ -663,8 +742,7 @@ class RecoverPodcastTranscripts:
 
             # add eager-loading options
             query = query.options(
-                selectinload(JobDeployment.episode)
-                    .selectinload(PodcastEpisode.paths)
+                selectinload(JobDeployment.episode).selectinload(PodcastEpisode.paths)
             )
 
             # apply filters
@@ -672,7 +750,6 @@ class RecoverPodcastTranscripts:
 
             # execute
             job = query.first()
-
 
             if not job:
                 logger.error(f"Job with ULID {ulid} not found in the database.")
@@ -694,18 +771,18 @@ class RecoverPodcastTranscripts:
                 response.raise_for_status()
             except requests.exceptions.RequestException as e:
                 logger.error(f"Failed to download transcript for ULID {ulid}: {e}")
-                job.job_status = 'download_failed'
+                job.job_status = "download_failed"
                 session.commit()
                 return
 
             # 4. Save the file
             try:
                 transcript_path.parent.mkdir(parents=True, exist_ok=True)
-                transcript_path.write_text(response.text, encoding='utf-8')
+                transcript_path.write_text(response.text, encoding="utf-8")
                 logger.info(f"Transcript for {ulid} saved to {transcript_path}")
             except IOError as e:
                 logger.error(f"Failed to write transcript to disk for ULID {ulid}: {e}")
-                job.job_status = 'download_failed'
+                job.job_status = "download_failed"
                 session.commit()
                 return
 
@@ -715,25 +792,32 @@ class RecoverPodcastTranscripts:
                 episode_id=job.episode.id,
                 file_path=str(transcript_path),
                 file_name=transcript_path.name,
-                file_type='transcript'
+                file_type="transcript",
             )
             session.add(new_path)
-            logger.debug(f"Created new PodcastPath entry for transcript: {transcript_path.name}")
+            logger.debug(
+                f"Created new PodcastPath entry for transcript: {transcript_path.name}"
+            )
 
             # Update JobDeployment status
-            job.job_status = 'retrieved'
+            job.job_status = "retrieved"
             logger.debug(f"Updated JobDeployment status to 'retrieved' for ULID {ulid}")
-            
+
             # Update PodcastEpisode status
             episode = job.episode
-            episode.transcription_status = 'completed'
-            logger.debug(f"Updated PodcastEpisode '{episode.title}' transcription_status to 'completed'.")
+            episode.transcription_status = "completed"
+            logger.debug(
+                f"Updated PodcastEpisode '{episode.title}' transcription_status to 'completed'."
+            )
 
             session.commit()
             logger.info(f"Successfully processed and updated database for job {ulid}.")
 
         except Exception as e:
-            logger.error(f'An unexpected error occurred during download process for {ulid}: {e}', exc_info=True)
+            logger.error(
+                f"An unexpected error occurred during download process for {ulid}: {e}",
+                exc_info=True,
+            )
             session.rollback()
         finally:
             session.close()
@@ -750,16 +834,14 @@ class RecoverPodcastTranscripts:
             episode_id = entry.epidode_id
 
             # enter row into PostProcessTranscripts
-            new_row = PostProcessingStatus(
-                episode_id = episode_id,
-                status = 'pending'
-            )
+            new_row = PostProcessingStatus(episode_id=episode_id, status="pending")
             session.add(new_row)
             session.commit()
         except Exception as e:
-            logger.error(f'Something happened iwth updating postProcessing table: {e}')
+            logger.error(f"Something happened iwth updating postProcessing table: {e}")
         finally:
             session.close()
+
 
 def gemini_worker_func():
     """Worker thread for processing transcripts with Gemini."""
@@ -768,57 +850,79 @@ def gemini_worker_func():
         session = SessionLocal()
         try:
             # Find one pending episode
-            post_job = session.query(PostProcessingStatus).join(
-                PodcastPath, PostProcessingStatus.episode_id == PodcastPath.episode_id
-            ).filter(
-                PostProcessingStatus.status == 'pending',
-                PodcastPath.file_type == 'transcript'
-            ).first()
+            post_job = (
+                session.query(PostProcessingStatus)
+                .join(
+                    PodcastPath,
+                    PostProcessingStatus.episode_id == PodcastPath.episode_id,
+                )
+                .filter(
+                    PostProcessingStatus.status == "pending",
+                    PodcastPath.file_type == "transcript",
+                )
+                .first()
+            )
 
             if not post_job:
-                logger.info("No more pending episodes for Gemini. Worker shutting down.")
+                logger.info(
+                    "No more pending episodes for Gemini. Worker shutting down."
+                )
                 break
 
             logger.info(f"[Gemini] Processing episode_id: {post_job.episode_id}")
-            
-            # Find the transcript path
-            transcript_path_obj = session.query(PodcastPath).filter(
-                PodcastPath.episode_id == post_job.episode_id,
-                PodcastPath.file_type == 'transcript'
-            ).first()
 
-            if not transcript_path_obj or not Path(transcript_path_obj.file_path).exists():
-                logger.error(f"[Gemini] Transcript not found for episode_id: {post_job.episode_id}. Setting status to 'error'.")
-                post_job.status = 'error_missing_transcript'
+            # Find the transcript path
+            transcript_path_obj = (
+                session.query(PodcastPath)
+                .filter(
+                    PodcastPath.episode_id == post_job.episode_id,
+                    PodcastPath.file_type == "transcript",
+                )
+                .first()
+            )
+
+            if (
+                not transcript_path_obj
+                or not Path(transcript_path_obj.file_path).exists()
+            ):
+                logger.error(
+                    f"[Gemini] Transcript not found for episode_id: {post_job.episode_id}. Setting status to 'error'."
+                )
+                post_job.status = "error_missing_transcript"
                 session.commit()
                 continue
 
             transcript_path = Path(transcript_path_obj.file_path)
-            
+
             # Process with Gemini
             gemini_processor = GeminiProcessor()
             status = gemini_processor.format_transcript(transcript_path)
 
-            if status == 'good':
-                post_job.status = 'gemini_complete'
-                logger.info(f"[Gemini] Successfully processed episode_id: {post_job.episode_id}. Status set to 'gemini_complete'.")
-            elif status == 'out of quota':
+            if status == "good":
+                post_job.status = "gemini_complete"
+                logger.info(
+                    f"[Gemini] Successfully processed episode_id: {post_job.episode_id}. Status set to 'gemini_complete'."
+                )
+            elif status == "out of quota":
                 logger.warning("[Gemini] Quota exceeded. Worker shutting down.")
-                post_job.status = 'pending_quota_exceeded'
+                post_job.status = "pending_quota_exceeded"
                 session.commit()
-                break # Exit loop on quota error
+                break  # Exit loop on quota error
             else:
-                post_job.status = 'error_gemini'
-            
+                post_job.status = "error_gemini"
+
             session.commit()
 
         except Exception as e:
-            logger.exception(f"[Gemini] An unexpected error occurred in the Gemini worker.")
-            if 'session' in locals() and session.is_active:
+            logger.exception(
+                f"[Gemini] An unexpected error occurred in the Gemini worker."
+            )
+            if "session" in locals() and session.is_active:
                 session.rollback()
         finally:
-            if 'session' in locals():
+            if "session" in locals():
                 session.close()
+
 
 def ollama_worker_func():
     """Worker thread for processing transcripts with Ollama."""
@@ -827,67 +931,93 @@ def ollama_worker_func():
         session = SessionLocal()
         try:
             # Find one episode marked as 'gemini_complete'
-            post_job = session.query(PostProcessingStatus).filter(
-                PostProcessingStatus.status == 'gemini_complete'
-            ).first()
+            post_job = (
+                session.query(PostProcessingStatus)
+                .filter(PostProcessingStatus.status == "gemini_complete")
+                .first()
+            )
 
             if not post_job:
-                logger.info("No more 'gemini_complete' episodes for Ollama. Worker will check again later.")
-                time.sleep(10) # Wait before checking again
+                logger.info(
+                    "No more 'gemini_complete' episodes for Ollama. Worker will check again later."
+                )
+                time.sleep(10)  # Wait before checking again
                 # check if the other thread is alive
-                gemini_thread_alive = any(t.name == 'GeminiThread' and t.is_alive() for t in threading.enumerate())
+                gemini_thread_alive = any(
+                    t.name == "GeminiThread" and t.is_alive()
+                    for t in threading.enumerate()
+                )
                 if not gemini_thread_alive:
-                    logger.info("Gemini thread is no longer active. Shutting down Ollama worker.")
+                    logger.info(
+                        "Gemini thread is no longer active. Shutting down Ollama worker."
+                    )
                     break
                 else:
                     continue
-            
+
             logger.info(f"[Ollama] Processing episode_id: {post_job.episode_id}")
 
             # Find the FORMATTED transcript path
-            transcript_path_obj = session.query(PodcastPath).filter(
-                PodcastPath.episode_id == post_job.episode_id,
-                PodcastPath.file_type == 'transcript'
-            ).first()
+            transcript_path_obj = (
+                session.query(PodcastPath)
+                .filter(
+                    PodcastPath.episode_id == post_job.episode_id,
+                    PodcastPath.file_type == "transcript",
+                )
+                .first()
+            )
 
             if not transcript_path_obj:
-                logger.error(f"[Ollama] Original transcript path not found for episode_id: {post_job.episode_id}. Setting status to 'error'.")
-                post_job.status = 'error_missing_transcript'
+                logger.error(
+                    f"[Ollama] Original transcript path not found for episode_id: {post_job.episode_id}. Setting status to 'error'."
+                )
+                post_job.status = "error_missing_transcript"
                 session.commit()
                 continue
-            
+
             formatted_transcript_path = Path(transcript_path_obj.file_path).with_name(
                 Path(transcript_path_obj.file_path).stem + "_formatted.txt"
             )
 
             if not formatted_transcript_path.exists():
-                logger.error(f"[Ollama] Formatted transcript not found for episode_id: {post_job.episode_id} at {formatted_transcript_path}. Setting status to 'error_missing_formatted_file'.")
-                post_job.status = 'error_missing_formatted_file'
+                logger.error(
+                    f"[Ollama] Formatted transcript not found for episode_id: {post_job.episode_id} at {formatted_transcript_path}. Setting status to 'error_missing_formatted_file'."
+                )
+                post_job.status = "error_missing_formatted_file"
                 session.commit()
                 continue
 
             # Process with Ollama
             ollama_processor = OllamaProcessor()
             ollama_processor.generate_metadata(formatted_transcript_path)
-            
-            post_job.status = 'completed'
+
+            post_job.status = "completed"
             post_job.completed_at = utcnow()
-            logger.info(f"[Ollama] Successfully processed episode_id: {post_job.episode_id}. Status set to 'completed'.")
+            logger.info(
+                f"[Ollama] Successfully processed episode_id: {post_job.episode_id}. Status set to 'completed'."
+            )
             session.commit()
 
         except Exception as e:
-            logger.exception(f"[Ollama] An unexpected error occurred in the Ollama worker.")
-            if 'session' in locals() and session.is_active:
+            logger.exception(
+                f"[Ollama] An unexpected error occurred in the Ollama worker."
+            )
+            if "session" in locals() and session.is_active:
                 session.rollback()
         finally:
-            if 'session' in locals():
+            if "session" in locals():
                 session.close()
+
 
 class ProcessingPipeline:
     def __init__(self):
         logger.info("Initializing automated processing pipeline...")
-        self.gemini_thread = threading.Thread(target=gemini_worker_func, name="GeminiThread")
-        self.ollama_thread = threading.Thread(target=ollama_worker_func, name="OllamaThread")
+        self.gemini_thread = threading.Thread(
+            target=gemini_worker_func, name="GeminiThread"
+        )
+        self.ollama_thread = threading.Thread(
+            target=ollama_worker_func, name="OllamaThread"
+        )
 
     def start(self):
         logger.info("Starting Gemini and Ollama worker threads.")
@@ -898,48 +1028,49 @@ class ProcessingPipeline:
         logger.info("Gemini worker thread has finished.")
         self.ollama_thread.join()
         logger.info("Ollama worker thread has finished.")
-        
+
         logger.info("Automated processing pipeline complete.")
+
 
 if __name__ == "__main__":
     setup_logging()
     url = "https://feeds.buzzsprout.com/2544823.rss"
 
     options = {
-        '1': 'Start podcast collection flow',
-        '2': 'Download Podcast episodes',
-        '3': 'Deploy podcast processing jobs',
-        '4': 'Recover completed transcripts from server',
-        '5': 'Start Automated Processing Pipeline',
-        'q': 'Quit'
+        "1": "Start podcast collection flow",
+        "2": "Download Podcast episodes",
+        "3": "Deploy podcast processing jobs",
+        "4": "Recover completed transcripts from server",
+        "5": "Enter Editing Pipeline",
+        "q": "Quit",
     }
 
     while True:
-        logger.info('\n*****Program initiated*****')
+        logger.info("\n*****Program initiated*****")
         print("\nSelect an option:")
         for option in options:
             print(f"{option}: {options[option]}")
-        
+
         choice = input("Enter option number: ").strip()
 
-        if choice == '1':
+        if choice == "1":
             collector = PodcastCollection(url)
             collector.standard_flow()
-        
-        elif choice == '2':
+
+        elif choice == "2":
             downloader = PodcastDownloader()
             downloader.start_downloads()
 
-        elif choice == '3':
+        elif choice == "3":
             deployer = DeployPodcastProcessing()
-        
-        elif choice == '4':
+
+        elif choice == "4":
             recovery_agent = RecoverPodcastTranscripts()
-        
-        elif choice == '5':
-            pipeline = ProcessingPipeline()
-            pipeline.start()
-        
-        elif choice.lower() == 'q':
+
+        elif choice == "5":
+            controller = PipelineController()
+            controller.start()
+
+        elif choice.lower() == "q":
             logger.info("User chose to quit. Exiting program.")
             exit(0)
