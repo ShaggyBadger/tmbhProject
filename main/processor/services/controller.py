@@ -24,6 +24,7 @@ if str(main_dir) not in sys.path:
 from processor.services.database import PipelineDatabase
 from processor.services.initializer import PipelineInitializer
 from processor.services.reorganizer import PodcastReorganizer
+from processor.services.analytics import MissionDebrief
 from processor.config import config
 from processor.models import JobData
 from joshlib.gemini import GeminiClient  # Import GeminiClient and GeminiResult
@@ -45,6 +46,7 @@ class PipelineController:
         self.db = PipelineDatabase()
         self.initializer = PipelineInitializer(self.db)
         self.reorganizer = PodcastReorganizer(self.db)
+        self.analytics = MissionDebrief(self.db)
 
         # Initialize specialized clients
         self.gemini_client = GeminiClient()
@@ -116,6 +118,7 @@ class PipelineController:
             table.add_row(f"[{config.primary}]1.[/] DEPLOY SELECTION MODULE")
             table.add_row(f"[{config.warning}]2.[/] MANUAL FAILURE REVIEW (MANUSCRIPT)")
             table.add_row(f"[{config.warning}]3.[/] REORGANIZE UNKNOWN SEASONS")
+            table.add_row(f"[{config.warning}]4.[/] MISSION DEBRIEF (GLOBAL ANALYTICS)")
             table.add_row(f"[{config.warning}]Q.[/] ABORT TO BASE")
 
             console.print(table)
@@ -132,6 +135,8 @@ class PipelineController:
                 self._manual_failure_review()
             elif choice == "3":
                 self.reorganizer.start()
+            elif choice == "4":
+                self.analytics.show()
             elif choice == "q":
                 break
 
@@ -586,6 +591,12 @@ class PipelineController:
         mg_status = "[green]DEPLOYED[/]" if job_data.manuscript else "[dim]PENDING[/]"
         status_table.add_row(f"[{config.info}]MANUSCRIPT_GEN:  [/] {mg_status}")
 
+        # Archive Status
+        arch_status = (
+            "[green]ARCHIVED[/]" if job_data.audio_archived else "[dim]PENDING[/]"
+        )
+        status_table.add_row(f"[{config.info}]AUDIO_ARCHIVE:   [/] {arch_status}")
+
         console.print(status_table)
         console.print(f"[{config.primary}]" + "-" * 40 + "[/]")
 
@@ -985,6 +996,17 @@ class PipelineController:
         if status == "failed":
             return status, message
 
+        # Stage 8: Archive Compression (Final Step)
+        status, message = self._perform_audio_compression(
+            episode_dir, job_data, episode
+        )
+        if status == "failed":
+            self.logger.error(f"Stage 8 failed: {message}")
+            # We don't abort the whole pipeline if compression fails, as the core work is done.
+            console.print(
+                f"[{config.warning}]WARNING: ARCHIVE COMPRESSION FAILED: {message}[/]"
+            )
+
         # Final TUI update
         self._display_episode_status(episode, job_data)
 
@@ -1014,6 +1036,7 @@ class PipelineController:
             return "success", "ALL PARAGRAPHS ALREADY PROCESSED"
 
         self.logger.info(f"Processing {len(to_process)} paragraphs for refinement.")
+        total_paragraphs = len(job_data.paragraphs)
 
         # Prompt Paths
         edit_prompt_dir = Path(__file__).parent / "prompts/editing"
@@ -1605,6 +1628,99 @@ class PipelineController:
             )
 
         return "success", "MANUSCRIPT EVALUATION COMPLETE"
+
+    def _perform_audio_compression(
+        self, episode_dir: Path, job_data: JobData, episode
+    ) -> tuple[str, str]:
+        """Compresses the audio file to 64k Mono for archival storage."""
+        self.logger.info("Starting Stage 8: Archive Compression.")
+
+        if job_data.audio_archived:
+            self.logger.info("Audio already archived. Skipping compression.")
+            return "success", "AUDIO ALREADY ARCHIVED"
+
+        # Find the audio file
+        # We look for .mp3 files that are NOT the _compressed version (in case of re-runs)
+        audio_files = list(episode_dir.glob("*.mp3"))
+        target_file = None
+
+        # Filter out temp files or backups if any
+        for f in audio_files:
+            if "_compressed" not in f.name:
+                target_file = f
+                break
+
+        if not target_file:
+            self.logger.warning("No suitable MP3 file found for compression.")
+            return "skipped", "NO AUDIO FILE FOUND"
+
+        # Check if already compressed (heuristic: check bitrate or just check if we did it)
+        # For now, we'll just check if a backup exists or metadata.
+        # Actually, let's just do it. If it's already 64k, ffmpeg will just copy or re-encode fast.
+
+        output_file = episode_dir / f"{target_file.stem}_compressed.mp3"
+
+        original_size = target_file.stat().st_size
+        self.logger.info(f"Original file size: {original_size / 1024 / 1024:.2f} MB")
+
+        import subprocess
+
+        # ffmpeg command: 64k bitrate (-b:a 64k), Mono (-ac 1), overwrite (-y), quiet (-v error)
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(target_file),
+            "-b:a",
+            "64k",
+            "-ac",
+            "1",
+            "-v",
+            "error",
+            str(output_file),
+        ]
+
+        try:
+            with console.status(
+                f"[{config.primary}]COMPRESSING AUDIO ARCHIVE (64k Mono)...[/]",
+                spinner=config.spinner_type,
+                spinner_style=config.spinner_color,
+            ):
+                self.logger.debug(f"Running compression command: {' '.join(cmd)}")
+                subprocess.run(cmd, check=True)
+
+            if not output_file.exists():
+                self.logger.error("FFmpeg finished but output file is missing.")
+                return "failed", "COMPRESSION FAILED: Output missing."
+
+            new_size = output_file.stat().st_size
+            reduction = (original_size - new_size) / original_size * 100
+
+            self.logger.info(
+                f"Compressed size: {new_size / 1024 / 1024:.2f} MB. Reduction: {reduction:.1f}%"
+            )
+
+            # Replace original
+            # 1. Update database path if the name changed (it won't, we rename back)
+            # 2. Rename compressed to original name
+
+            output_file.replace(target_file)
+
+            # Update job_data
+            job_data.audio_archived = True
+            self.db.save_job_data(episode_dir, job_data)
+
+            console.print(
+                f"[{config.success}]AUDIO ARCHIVED: {new_size / 1024 / 1024:.2f} MB (Saved {reduction:.0f}%)[/]"
+            )
+            return "success", f"AUDIO COMPRESSED (Saved {reduction:.0f}%)"
+
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"FFmpeg failed: {e}")
+            return "failed", "AUDIO COMPRESSION FAILED (FFmpeg Error)"
+        except Exception as e:
+            self.logger.exception("Unexpected error during compression.")
+            return "failed", f"AUDIO COMPRESSION ERROR: {e}"
 
     def _sanitize_text(self, text: str) -> str:
         """Sanitizes text based on Vibe Code Report guidelines and strips Markdown."""

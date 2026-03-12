@@ -103,14 +103,64 @@ class PipelineDatabase:
         finally:
             session.close()
 
+    def get_all_job_data(self) -> List[tuple[PodcastEpisode, JobData]]:
+        """Fetches all completed episodes and their associated JobData."""
+        logger.debug("Fetching all episodes and job data for analytics.")
+        episodes = self.get_completed_episodes()
+        results = []
+        for ep in episodes:
+            ep_dir = self.get_episode_directory(ep.id)
+            if ep_dir:
+                job_data = self.load_job_data(ep_dir)
+                results.append((ep, job_data))
+        return results
+
     def get_unknown_season_episodes(self) -> List[PodcastEpisode]:
-        """Returns episodes that are not assigned to a season."""
-        logger.debug("Fetching all episodes without a season assignment.")
+        """Scans the file system for episodes in 'unknown_season' directories and returns their DB records."""
+        logger.debug(
+            "Scanning file system for episodes in 'unknown_season' directories."
+        )
+
+        # 1. Find all unknown_season directories
+        # Path(__file__).resolve().parents[2] is the 'main/' directory
+        main_dir = Path(__file__).resolve().parents[2]
+        podcast_files_root = main_dir / "podcast_files"
+
+        logger.debug(f"Searching in: {podcast_files_root}")
+        unknown_dirs = list(podcast_files_root.glob("**/unknown_season"))
+        logger.debug(f"Found {len(unknown_dirs)} 'unknown_season' base directories.")
+
+        episode_ids = set()
+        for d in unknown_dirs:
+            # 2. Each directory in unknown_season is named {id}_{title}
+            for item in d.iterdir():
+                if item.is_dir():
+                    name_parts = item.name.split("_", 1)
+                    if name_parts[0].isdigit():
+                        ep_id = int(name_parts[0])
+                        episode_ids.add(ep_id)
+
+        if not episode_ids:
+            logger.info("No episode directories found in any 'unknown_season' folder.")
+            return []
+
+        logger.debug(
+            f"Extracted {len(episode_ids)} unique episode IDs from unknown_season folders."
+        )
+
+        # 3. Fetch these from DB
+        return self.get_episodes_by_ids(list(episode_ids))
+
+    def get_episodes_by_ids(self, episode_ids: List[int]) -> List[PodcastEpisode]:
+        """Fetch multiple episodes by their IDs."""
+        if not episode_ids:
+            return []
         session = self.session_factory()
         try:
             return (
                 session.query(PodcastEpisode)
-                .filter(PodcastEpisode.season_id == None)
+                .options(joinedload(PodcastEpisode.season))
+                .filter(PodcastEpisode.id.in_(episode_ids))
                 .order_by(PodcastEpisode.id.asc())
                 .all()
             )

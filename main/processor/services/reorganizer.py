@@ -1,5 +1,7 @@
 import shutil
 import logging
+import re
+import time
 from pathlib import Path
 from typing import List, Tuple
 from rich.console import Console
@@ -76,6 +78,10 @@ class PodcastReorganizer:
 
     def _reorganize_episode(self, episode: PodcastEpisode):
         """Handle the re-assignment of a single episode."""
+        # Load extra context from JobData if available
+        old_dir = self.db.get_episode_directory(episode.id)
+        job_data = self.db.load_job_data(old_dir) if old_dir else None
+
         while True:
             console.clear()
             console.print(
@@ -86,18 +92,42 @@ class PodcastReorganizer:
                 )
             )
 
-            # Display Episode Info
+            # Display Episode Info from Database
             info_table = Table(show_header=False, box=None)
             info_table.add_row(f"[{config.primary}]ID:[/]", str(episode.id))
             info_table.add_row(f"[{config.primary}]TITLE:[/]", episode.title)
-            info_table.add_row(
-                f"[{config.primary}]SUMMARY:[/]",
-                (
-                    (episode.summary[:200] + "...")
-                    if episode.summary and len(episode.summary) > 200
-                    else (episode.summary or "N/A")
-                ),
-            )
+
+            # Display Metadata from JobData if it exists
+            if job_data and job_data.metadata:
+                m = job_data.metadata
+                summary = m.summary or episode.summary or "N/A"
+                primary_text = m.primary_text or "N/A"
+
+                # Format long text
+                def truncate(text, limit=300):
+                    if not text:
+                        return "N/A"
+                    return (text[:limit] + "...") if len(text) > limit else text
+
+                info_table.add_row(
+                    f"[{config.primary}]SUMMARY (JSON):[/]", truncate(summary)
+                )
+                info_table.add_row(
+                    f"[{config.primary}]PRIMARY TEXT:[/]", truncate(primary_text)
+                )
+                info_table.add_row(
+                    f"[{config.primary}]THESIS:[/]", truncate(m.thesis, 150)
+                )
+            else:
+                info_table.add_row(
+                    f"[{config.primary}]SUMMARY (DB):[/]",
+                    (
+                        (episode.summary[:200] + "...")
+                        if episode.summary and len(episode.summary) > 200
+                        else (episode.summary or "N/A")
+                    ),
+                )
+
             console.print(info_table)
 
             # Fetch Available Seasons
@@ -135,8 +165,6 @@ class PodcastReorganizer:
             else:
                 console.print(f"[{config.error}]INVALID INPUT.[/]")
 
-            import time
-
             time.sleep(1)
 
     def _execute_move(self, episode: PodcastEpisode, target_season: PodcastSeason):
@@ -159,8 +187,6 @@ class PodcastReorganizer:
         # We need to know where the podcast root is.
         # Usually it's old_dir.parent.parent (unknown_season/episode_dir -> podcast_root/unknown_season/episode_dir)
         podcast_root = old_dir.parent.parent
-
-        import re
 
         cleaned_season_name = re.sub(r"\W+", "_", target_season.code.lower())
         new_season_dir = podcast_root / cleaned_season_name

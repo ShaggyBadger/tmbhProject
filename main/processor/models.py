@@ -29,6 +29,7 @@ class JobData:
     manuscript_failure_reason: str | None = None
     manuscript_score: int | None = None
     manuscript_eval: str | None = None
+    audio_archived: bool = False
     failed_formatting_attempts: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:

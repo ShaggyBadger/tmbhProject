@@ -21,8 +21,9 @@ from logging_config import setup_logging
 from datetime import datetime, timezone
 from transcriptProcessing import GeminiProcessor, OllamaProcessor
 from processor.services.controller import PipelineController
+from processor.services.preflight import PreflightCheck
 
-install(show_locals=False)
+install(show_locals=True, width=120)
 logger = logging.getLogger(__name__)
 
 
@@ -1034,6 +1035,12 @@ class ProcessingPipeline:
 
 if __name__ == "__main__":
     setup_logging()
+
+    # Run tactical pre-flight diagnostics
+    preflight = PreflightCheck()
+    if not preflight.run_all():
+        sys.exit(1)
+
     url = "https://feeds.buzzsprout.com/2544823.rss"
 
     options = {
@@ -1045,32 +1052,38 @@ if __name__ == "__main__":
         "q": "Quit",
     }
 
-    while True:
-        logger.info("\n*****Program initiated*****")
-        print("\nSelect an option:")
-        for option in options:
-            print(f"{option}: {options[option]}")
+    try:
+        while True:
+            logger.info("\n*****Program initiated*****")
+            print("\nSelect an option:")
+            for option in options:
+                print(f"{option}: {options[option]}")
 
-        choice = input("Enter option number: ").strip()
+            choice = input("Enter option number: ").strip()
 
-        if choice == "1":
-            collector = PodcastCollection(url)
-            collector.standard_flow()
+            if choice == "1":
+                collector = PodcastCollection(url)
+                collector.standard_flow()
 
-        elif choice == "2":
-            downloader = PodcastDownloader()
-            downloader.start_downloads()
+            elif choice == "2":
+                downloader = PodcastDownloader()
+                downloader.start_downloads()
 
-        elif choice == "3":
-            deployer = DeployPodcastProcessing()
+            elif choice == "3":
+                deployer = DeployPodcastProcessing()
 
-        elif choice == "4":
-            recovery_agent = RecoverPodcastTranscripts()
+            elif choice == "4":
+                recovery_agent = RecoverPodcastTranscripts()
 
-        elif choice == "5":
-            controller = PipelineController()
-            controller.start()
+            elif choice == "5":
+                controller = PipelineController()
+                controller.start()
 
-        elif choice.lower() == "q":
-            logger.info("User chose to quit. Exiting program.")
-            exit(0)
+            elif choice.lower() == "q":
+                logger.info("User chose to quit. Exiting program.")
+                exit(0)
+    except Exception:
+        logger.exception(
+            "CRITICAL SYSTEM FAILURE: Unhandled exception occurred in main loop."
+        )
+        sys.exit(1)
