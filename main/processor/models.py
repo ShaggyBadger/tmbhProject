@@ -25,6 +25,8 @@ class JobData:
         default_factory=list
     )  # [{'index': int, 'original': str, 'edited': str | None, 'critique': str | None, 'evaluation_score': int | None}]
     manuscript: str | None = None
+    manuscript_is_failure: bool = False
+    manuscript_failure_reason: str | None = None
     manuscript_score: int | None = None
     manuscript_eval: str | None = None
     failed_formatting_attempts: list[dict[str, Any]] = field(default_factory=list)

@@ -2,8 +2,10 @@ import logging.config
 import colorlog
 import os
 
-# Determine the absolute path for the log file, placing it in the same directory as this script.
-log_file_path = os.path.join(os.path.dirname(__file__), "app.log")
+# Paths for log files
+base_dir = os.path.dirname(__file__)
+persistent_log_path = os.path.join(base_dir, "app.log")
+debug_log_path = os.path.join(base_dir, "debug.log")
 
 LOGGING_CONFIG = {
     "version": 1,
@@ -28,24 +30,32 @@ LOGGING_CONFIG = {
     },
     "handlers": {
         "console": {
-            "level": "INFO",  # Set to INFO to show less verbose logs in console
+            "level": "ERROR",  # Only show ERROR or CRITICAL in terminal
             "formatter": "colored_formatter",
             "class": "colorlog.StreamHandler",
         },
-        "file": {
-            "level": "DEBUG",
+        "persistent_file": {
+            "level": "INFO",  # INFO and above (WARNING, ERROR, CRITICAL)
             "formatter": "standard",
             "class": "logging.handlers.RotatingFileHandler",
-            "filename": log_file_path,
+            "filename": persistent_log_path,
             "maxBytes": 10485760,  # 10MB
             "backupCount": 5,
+            "encoding": "utf8",
+        },
+        "debug_file": {
+            "level": "DEBUG",  # Everything
+            "formatter": "standard",
+            "class": "logging.FileHandler",
+            "filename": debug_log_path,
+            "mode": "w",  # Overwrite each time
             "encoding": "utf8",
         },
     },
     "loggers": {
         "": {  # root logger
-            "handlers": ["console", "file"],
-            "level": "INFO",
+            "handlers": ["console", "persistent_file", "debug_file"],
+            "level": "DEBUG",  # Capture everything at the root level
             "propagate": True,
         },
     },

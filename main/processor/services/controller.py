@@ -23,6 +23,7 @@ if str(main_dir) not in sys.path:
 
 from processor.services.database import PipelineDatabase
 from processor.services.initializer import PipelineInitializer
+from processor.services.reorganizer import PodcastReorganizer
 from processor.config import config
 from processor.models import JobData
 from joshlib.gemini import GeminiClient  # Import GeminiClient and GeminiResult
@@ -35,11 +36,15 @@ class PipelineController:
     """Manages the TUI for the editing pipeline with a Tactical Terminal aesthetic."""
 
     def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self.logger.info("Initializing PipelineController.")
+
         # Silence noisy libraries
         logging.getLogger("paramiko").setLevel(logging.WARNING)
 
         self.db = PipelineDatabase()
         self.initializer = PipelineInitializer(self.db)
+        self.reorganizer = PodcastReorganizer(self.db)
 
         # Initialize specialized clients
         self.gemini_client = GeminiClient()
@@ -109,6 +114,8 @@ class PipelineController:
 
             table = Table(show_header=False, box=None)
             table.add_row(f"[{config.primary}]1.[/] DEPLOY SELECTION MODULE")
+            table.add_row(f"[{config.warning}]2.[/] MANUAL FAILURE REVIEW (MANUSCRIPT)")
+            table.add_row(f"[{config.warning}]3.[/] REORGANIZE UNKNOWN SEASONS")
             table.add_row(f"[{config.warning}]Q.[/] ABORT TO BASE")
 
             console.print(table)
@@ -121,6 +128,140 @@ class PipelineController:
 
             if choice == "1":
                 self.select_episode()
+            elif choice == "2":
+                self._manual_failure_review()
+            elif choice == "3":
+                self.reorganizer.start()
+            elif choice == "q":
+                break
+
+    def _manual_failure_review(self):
+        """Identifies and allows manual review of manuscript failures."""
+        self.logger.info("Initiating manual failure review scan.")
+        console.clear()
+        console.print(
+            Panel(
+                "MANUAL FAILURE REVIEW - SCANNING ASSETS...",
+                style=config.header,
+                border_style=config.panel_border,
+            )
+        )
+
+        all_episodes = self.db.get_completed_episodes()
+        failed_episodes = []
+
+        with console.status(
+            f"[{config.primary}]SCANNING JOB DATA FOR FAILURES...[/]",
+            spinner=config.spinner_type,
+            spinner_style=config.spinner_color,
+        ):
+            for ep in all_episodes:
+                ep_dir = self.db.get_episode_directory(ep.id)
+                if ep_dir:
+                    job_data = self.db.load_job_data(ep_dir)
+                    if job_data.manuscript_is_failure:
+                        self.logger.info(
+                            f"Detected failure for episode: {ep.title} (ID: {ep.id})"
+                        )
+                        failed_episodes.append((ep, job_data, ep_dir))
+
+        if not failed_episodes:
+            self.logger.info("No manuscript failures found during scan.")
+            console.print(
+                f"[{config.success}]NO MANUSCRIPT FAILURES DETECTED. ALL SYSTEMS NOMINAL.[/]"
+            )
+            console.input("\nCONTINUE...")
+            return
+
+        self.logger.info(f"Found {len(failed_episodes)} failures for review.")
+        total_fails = len(failed_episodes)
+        for idx, (ep, job_data, ep_dir) in enumerate(failed_episodes, start=1):
+            console.clear()
+            console.print(
+                Panel(
+                    f"FAILURE REVIEW [{idx}/{total_fails}]: {ep.title}",
+                    style=config.warning,
+                    border_style=config.panel_border,
+                )
+            )
+
+            # Calculate stats for display
+            original_text = ""
+            if job_data.paragraphs:
+                original_text = "\n\n".join(
+                    [p["original"] for p in job_data.paragraphs]
+                )
+
+            orig_wc = len(original_text.split()) if original_text else 0
+            manu_wc = len(job_data.manuscript.split()) if job_data.manuscript else 0
+            ratio = manu_wc / orig_wc if orig_wc > 0 else 0
+
+            stats_table = Table(title="ASSET STATS", show_header=True, box=None)
+            stats_table.add_column("METRIC", style=config.primary)
+            stats_table.add_column("VALUE")
+            stats_table.add_row("ORIGINAL WORD COUNT", str(orig_wc))
+            stats_table.add_row("MANUSCRIPT WORD COUNT", str(manu_wc))
+            stats_table.add_row("CURRENT RATIO", f"{ratio:.2f}")
+            stats_table.add_row(
+                "FAILURE REASON",
+                f"[{config.error}]{job_data.manuscript_failure_reason}[/]",
+            )
+
+            console.print(stats_table)
+
+            if job_data.manuscript_eval:
+                console.print(f"\n[{config.secondary}]LATEST EVALUATION REPORT:[/]")
+                # Trim long reports for display
+                report = job_data.manuscript_eval
+                if len(report) > 1000:
+                    report = report[:1000] + "..."
+                console.print(
+                    Panel(report, style=config.info, border_style=config.panel_border)
+                )
+
+            console.print(f"\n[{config.primary}]OPTIONS:[/]")
+            console.print(f"[{config.success}]1.[/] ACCEPT AS-IS (Clear Failure Flag)")
+            console.print(f"[{config.warning}]2.[/] RE-RUN POLISH (Stage 6)")
+            console.print(f"[{config.secondary}]S.[/] SKIP FOR NOW")
+            console.print(f"[{config.error}]Q.[/] ABORT REVIEW")
+
+            choice = ""
+            while choice not in ["1", "2", "s", "q"]:
+                choice = (
+                    console.input(f"\n[{config.secondary}]SELECT RESPONSE > [/]")
+                    .strip()
+                    .lower()
+                )
+
+            if choice == "1":
+                job_data.manuscript_is_failure = False
+                job_data.manuscript_failure_reason = None
+                self.db.save_job_data(ep_dir, job_data)
+                console.print(
+                    f"[{config.success}]ASSET ACCEPTED. FAILURE FLAG REMOVED.[/]"
+                )
+                time.sleep(1)
+            elif choice == "2":
+                # Clear current manuscript to trigger re-run
+                job_data.manuscript = None
+                job_data.manuscript_is_failure = False
+                job_data.manuscript_failure_reason = None
+                self.db.save_job_data(ep_dir, job_data)
+
+                console.print(f"[{config.warning}]TRIGGERING STAGE 6 RE-RUN...[/]")
+                status, message = self._perform_manuscript_assembly(
+                    ep_dir, job_data, ep
+                )
+
+                if status == "success":
+                    console.print(f"[{config.success}]RE-RUN COMPLETE: {message}[/]")
+                    # Also re-run evaluation if it was successful
+                    self._perform_manuscript_evaluation(ep_dir, job_data, ep)
+                else:
+                    console.print(f"[{config.error}]RE-RUN FAILED: {message}[/]")
+                console.input("\nPRESS ENTER TO CONTINUE...")
+            elif choice == "s":
+                continue
             elif choice == "q":
                 break
 
@@ -525,22 +666,31 @@ class PipelineController:
         Runs the full processing pipeline for a single episode, skipping steps that are already done.
         Returns a status ('success', 'skipped', 'failed') and a message.
         """
+        self.logger.info(
+            f"STARTING PIPELINE FOR EPISODE: {episode.title} (ID: {episode.id})"
+        )
         episode_dir = self.db.get_episode_directory(episode.id)
         if not episode_dir:
+            self.logger.error(f"Directory not found for episode ID: {episode.id}")
             return "failed", f"ERROR: Directory not found for episode UID {episode.id}"
 
         job_data = self.db.load_job_data(episode_dir)
 
         # Stage 1: Raw Transcript Extraction
         if not job_data.transcript_txt:
+            self.logger.info("Stage 1: Extracting raw transcript.")
             success, message = self._perform_transcript_extraction(episode)
             if not success:
+                self.logger.error(f"Stage 1 failed: {message}")
                 return "failed", f"RAW TRANSCRIPT EXTRACTION FAILED: {message}"
             job_data = self.db.load_job_data(episode_dir)
             self._display_episode_status(episode, job_data)
+        else:
+            self.logger.debug("Stage 1: Transcript already exists.")
 
         # Stage 2: Formatting Protocol
         if not job_data.formatted_txt and job_data.transcript_txt:
+            self.logger.info("Stage 2: Formatting transcript with Gemini.")
             # Load prompt
             FORMAT_PROMPT_PATH = (
                 Path(__file__).parent / "prompts/formatting/format-transcript.txt"
@@ -559,6 +709,7 @@ class PipelineController:
             original_word_count = len(clean_transcript.split())
 
             for attempt in range(1, 4):  # Max 3 attempts initially
+                self.logger.info(f"Stage 2: Formatting Attempt {attempt}/3 starting.")
                 with console.status(
                     f"[{config.primary}]FORMATTING (Attempt {attempt}) for {episode.title} using GEMINI...[/]",
                     spinner=config.spinner_type,
@@ -567,12 +718,21 @@ class PipelineController:
                     final_prompt = prompt_template.format(
                         TRANSCRIPT_TEXT=clean_transcript
                     )
+                    self.logger.debug(
+                        f"Submitting formatting prompt to Gemini. Prompt length: {len(final_prompt)} chars."
+                    )
                     gemini_result = self.gemini_client.submit_prompt(
                         final_prompt, retries=1
                     )  # Client has its own retry
 
                     if not gemini_result.ok:
+                        self.logger.error(
+                            f"Gemini formatting FAILED (Attempt {attempt}): {gemini_result.error_message}"
+                        )
                         if gemini_result.error_type == "quota":
+                            self.logger.critical(
+                                "GEMINI QUOTA EXCEEDED. Halting Stage 2."
+                            )
                             console.print(
                                 f"[{config.error}]GEMINI QUOTA EXCEEDED. HALTING ALL OPERATIONS.[/]"
                             )
@@ -587,11 +747,7 @@ class PipelineController:
                                     "attempt_number": attempt,
                                     "error_message": gemini_result.error_message,
                                     "word_count_ratio": "N/A",  # Not applicable for API failure
-                                    "formatted_text_preview": (
-                                        formatted_text[:500]
-                                        if formatted_text
-                                        else "No content returned"
-                                    ),
+                                    "formatted_text_preview": "API Failure",
                                 }
                             )
                             self.db.save_job_data(episode_dir, job_data)
@@ -599,22 +755,37 @@ class PipelineController:
 
                     formatted_text = gemini_result.output
                     if not formatted_text:
+                        self.logger.warning(
+                            f"Gemini returned empty output on Attempt {attempt}."
+                        )
                         console.print(
                             f"[{config.warning}]Gemini returned no formatted content (Attempt {attempt}).[/]"
                         )
                         continue
 
+                    self.logger.debug(
+                        f"Received formatted text. Length: {len(formatted_text)} chars."
+                    )
                     # Validate word count
                     formatted_word_count = len(formatted_text.split())
                     word_count_ratio = formatted_word_count / original_word_count
+                    self.logger.info(
+                        f"Attempt {attempt}: Word count: {formatted_word_count}, Ratio: {word_count_ratio:.2f}"
+                    )
 
                     if 0.98 <= word_count_ratio <= 1.02:  # Within 2%
+                        self.logger.info(
+                            f"Formatting SUCCESSFUL on attempt {attempt} (Ratio: {word_count_ratio:.2f})."
+                        )
                         job_data.formatted_txt = formatted_text
                         job_data.paragraphs = [
                             {"index": i, "original": p.strip(), "edited": None}
                             for i, p in enumerate(formatted_text.split("\n\n"))
                             if p.strip()
                         ]
+                        self.logger.info(
+                            f"Generated {len(job_data.paragraphs)} paragraphs for refinement."
+                        )
                         self.db.save_job_data(episode_dir, job_data)
                         # Instead of returning, set a status message and continue
                         console.print(
@@ -623,6 +794,9 @@ class PipelineController:
                         self._display_episode_status(episode, job_data)
                         break  # Exit the retry loop on success
                     else:
+                        self.logger.warning(
+                            f"Formatting Word Count Mismatch (Attempt {attempt}): Ratio {word_count_ratio:.2f}."
+                        )
                         console.print(
                             f"[{config.warning}]Word count mismatch (Attempt {attempt}): Ratio {word_count_ratio:.2f}. Retrying...[/]"
                         )
@@ -641,6 +815,9 @@ class PipelineController:
                         )
                         self.db.save_job_data(episode_dir, job_data)
                         if attempt == 3:  # After 3 failed attempts, prompt user
+                            self.logger.warning(
+                                "Formatting FAILED after 3 attempts. Entering manual intervention."
+                            )
                             while True:
                                 console.print(
                                     f"[{config.warning}]FORMATTING FAILED AFTER 3 ATTEMPTS FOR {episode.title}. WORD COUNT RATIO: {word_count_ratio:.2f}.[/]"
@@ -820,7 +997,9 @@ class PipelineController:
         self, episode_dir: Path, job_data: JobData, episode
     ) -> tuple[str, str]:
         """Iterates through paragraphs, edits them, and evaluates them using Ollama."""
+        self.logger.info("Starting paragraph editing pass.")
         if not job_data.paragraphs:
+            self.logger.warning("No paragraphs found for editing.")
             return "skipped", "NO PARAGRAPHS FOUND FOR EDITING"
 
         # A paragraph needs work if it hasn't passed evaluation (score < 7)
@@ -830,14 +1009,11 @@ class PipelineController:
             if p.get("evaluation_score") is None or p.get("evaluation_score") < 7
         ]
         if not to_process:
+            self.logger.info("All paragraphs already passed validation.")
             console.print(f"[{config.info}]ALL PARAGRAPHS ALREADY PASSED (SKIPPED)[/]")
             return "success", "ALL PARAGRAPHS ALREADY PROCESSED"
 
-        total_paragraphs = len(job_data.paragraphs)
-
-        console.print(
-            f"[{config.primary}]STARTING SEGMENT REFINEMENT & EVALUATION...[/]"
-        )
+        self.logger.info(f"Processing {len(to_process)} paragraphs for refinement.")
 
         # Prompt Paths
         edit_prompt_dir = Path(__file__).parent / "prompts/editing"
@@ -873,11 +1049,15 @@ class PipelineController:
             )
 
             for i, p_dict in enumerate(job_data.paragraphs):
+                self.logger.debug(f"Processing paragraph {i+1}/{total_paragraphs}.")
                 # Check if already passed
                 if (
                     p_dict.get("evaluation_score") is not None
                     and p_dict.get("evaluation_score") >= 7
                 ):
+                    self.logger.debug(
+                        f"Paragraph {i+1} already passed with score {p_dict['evaluation_score']}. Skipping."
+                    )
                     progress.advance(task)
                     continue
 
@@ -897,15 +1077,21 @@ class PipelineController:
                     else "last" if i == total_paragraphs - 1 else "standard"
                 )
 
+                self.logger.debug(
+                    f"Paragraph {i+1} type: {p_type}. Source length: {len(p_target)} chars."
+                )
+
                 # --- MULTI-ATTEMPT LOOP (Max 3 Tries) ---
                 passed = False
                 for attempt in range(1, 4):
+                    self.logger.info(f"Paragraph {i+1}, Attempt {attempt}/3 starting.")
                     progress.update(
                         task,
                         description=f"[{config.primary}]PROCESSING SEGMENT {i+1}/{total_paragraphs} (Attempt {attempt})...[/]",
                     )
 
                     # 1. EDITING
+                    self.logger.debug(f"Loading edit template for type: {p_type}")
                     edit_template = edit_prompts[p_type].read_text(encoding="utf-8")
                     base_prompt = edit_template.format(
                         SPEAKER_TONE=speaker_tone,
@@ -916,6 +1102,9 @@ class PipelineController:
 
                     # If it's a redo, append previous critique
                     if attempt > 1 and p_dict.get("critique"):
+                        self.logger.debug(
+                            f"Redo attempt: Appending previous critique to prompt."
+                        )
                         final_edit_prompt = (
                             base_prompt
                             + f"\n\n[CRITIQUE FROM PREVIOUS ATTEMPT - INCORPORATE THESE FIXES]:\n{p_dict['critique']}"
@@ -923,9 +1112,15 @@ class PipelineController:
                     else:
                         final_edit_prompt = base_prompt
 
+                    self.logger.debug(
+                        f"Submitting edit prompt to Ollama (Paragraph {i+1}). Prompt length: {len(final_edit_prompt)} chars."
+                    )
                     edit_result = self.ollama_client.submit_prompt(final_edit_prompt)
 
                     if not edit_result.ok or not edit_result.output:
+                        self.logger.error(
+                            f"Ollama EDITING FAILED at Paragraph {i+1}: {edit_result.error_message}"
+                        )
                         return (
                             "failed",
                             f"EDITING FAILED AT P#{i+1}: {edit_result.error_message}",
@@ -933,19 +1128,35 @@ class PipelineController:
 
                     # PARSER: Extract from markers (<<< >>>)
                     raw_edit = edit_result.output
+                    self.logger.debug(
+                        f"Received raw output from Ollama (Paragraph {i+1}). Length: {len(raw_edit)} chars."
+                    )
+
                     edit_match = re.search(
                         r"REFINED PARAGRAPH:\s*<<<+(.*?)(?:>>>|\Z)", raw_edit, re.DOTALL
                     )
                     if edit_match:
                         extracted_edit = edit_match.group(1).strip()
+                        self.logger.debug(
+                            f"Extracted edit from markers for Paragraph {i+1}."
+                        )
                     else:
                         # Fallback: if markers aren't there, take the whole thing and let sanitizer clean it
                         extracted_edit = raw_edit.strip()
+                        self.logger.warning(
+                            f"Markers NOT FOUND in Ollama output for Paragraph {i+1}. Using fallback extraction."
+                        )
 
                     sanitized = self._sanitize_text(extracted_edit)
                     p_dict["edited"] = sanitized
+                    self.logger.debug(
+                        f"Sanitized edit for Paragraph {i+1}. Length: {len(sanitized)} chars."
+                    )
 
                     # 2. EVALUATION
+                    self.logger.debug(
+                        f"Submitting evaluation prompt to Ollama (Paragraph {i+1})."
+                    )
                     eval_template = eval_prompts[p_type].read_text(encoding="utf-8")
                     eval_prompt = eval_template.format(
                         TONE=speaker_tone,
@@ -959,15 +1170,25 @@ class PipelineController:
                     eval_result = self.eval_client.submit_prompt(eval_prompt)
 
                     if not eval_result.ok or not eval_result.output:
+                        self.logger.error(
+                            f"Ollama EVALUATION FAILED at Paragraph {i+1}: {eval_result.error_message}"
+                        )
                         return (
                             "failed",
                             f"EVALUATION FAILED AT P#{i+1}: {eval_result.error_message}",
                         )
 
                     score, critique = self._parse_evaluation(eval_result.output)
+                    self.logger.info(
+                        f"Paragraph {i+1}, Attempt {attempt}: Received SCORE: {score}/10"
+                    )
+                    self.logger.debug(f"Critique for Paragraph {i+1}: {critique}")
 
                     # Auto-fail Heuristic
                     if "*" in p_dict["edited"] or "#" in p_dict["edited"]:
+                        self.logger.warning(
+                            f"Paragraph {i+1} AUTO-FAILED: Markdown/Asterisks detected in edit."
+                        )
                         score = 1
                         critique = "[AUTO-FAIL: Structural Discipline - Markdown/Asterisks detected.]"
 
@@ -977,11 +1198,21 @@ class PipelineController:
 
                     # Check for Success
                     if score >= 7:
+                        self.logger.info(
+                            f"Paragraph {i+1} PASSED with score {score} on attempt {attempt}."
+                        )
                         passed = True
                         break
+                    else:
+                        self.logger.info(
+                            f"Paragraph {i+1} REJECTED with score {score}. Retrying if attempts remain."
+                        )
 
                 # --- MANUAL INTERVENTION (If all 3 attempts failed) ---
                 if not passed:
+                    self.logger.warning(
+                        f"Paragraph {i+1} failed all 3 attempts. Entering manual intervention."
+                    )
                     # Pause progress bar to show UI
                     progress.stop()
                     console.clear()
@@ -1050,13 +1281,16 @@ class PipelineController:
         self, episode_dir: Path, job_data: JobData, episode
     ) -> tuple[str, str]:
         """Combines all edited paragraphs and performs a final polish pass using Gemini."""
+        self.logger.info("Starting manuscript assembly and polishing.")
         if job_data.manuscript:
+            self.logger.info("Manuscript already exists. Skipping assembly.")
             console.print(f"[{config.info}]MANUSCRIPT ALREADY ASSEMBLED (SKIPPED)[/]")
             return "success", "MANUSCRIPT ALREADY ASSEMBLED"
 
         # 1. PRE-FLIGHT CHECK: Ensure all paragraphs have score >= 7
         total_p = len(job_data.paragraphs)
         if total_p == 0:
+            self.logger.error("No paragraphs found for assembly.")
             return "failed", "ASSEMBLY FAILED: No paragraphs found."
 
         failed_p = [
@@ -1065,6 +1299,7 @@ class PipelineController:
             if p.get("evaluation_score") is None or p.get("evaluation_score") < 7
         ]
         if failed_p:
+            self.logger.warning(f"{len(failed_p)} paragraphs below quality threshold.")
             indices = [p.get("index", "?") for p in failed_p]
             console.print(
                 Panel(
@@ -1106,13 +1341,18 @@ class PipelineController:
 
         # 2. COMBINE PARAGRAPHS
         # Sort by index just in case
+        self.logger.debug("Combining all edited paragraphs for final polish.")
         sorted_paragraphs = sorted(job_data.paragraphs, key=lambda x: x.get("index", 0))
         combined_text = "\n\n".join([p["edited"] for p in sorted_paragraphs])
         original_word_count = len(combined_text.split())
+        self.logger.info(
+            f"Combined text length: {len(combined_text)} chars, {original_word_count} words."
+        )
 
         # 3. FINAL POLISH PASS (Gemini) with Word Count Validation
         prompt_path = Path(__file__).parent / "prompts/manuscript/full-pass.txt"
         if not prompt_path.exists():
+            self.logger.error(f"Manuscript prompt NOT FOUND: {prompt_path}")
             return "failed", f"MANUSCRIPT PROMPT NOT FOUND: {prompt_path}"
 
         prompt_template = prompt_path.read_text(encoding="utf-8")
@@ -1124,8 +1364,11 @@ class PipelineController:
 
         polished_text = None
         max_polish_attempts = 3
+        is_failure = False
+        failure_reason = None
 
         for attempt in range(1, max_polish_attempts + 1):
+            self.logger.info(f"Manuscript Polish, Attempt {attempt}/3 starting.")
             with console.status(
                 f"[{config.primary}]EXECUTING FINAL INTEGRITY PASS (GEMINI) - Attempt {attempt}...[/]",
                 spinner=config.spinner_type,
@@ -1138,32 +1381,66 @@ class PipelineController:
                     TEXT_TO_POLISH=combined_text,
                 )
 
+                self.logger.debug(
+                    f"Submitting manuscript polish prompt to Gemini. Prompt length: {len(final_prompt)} chars."
+                )
                 gemini_result = self.gemini_client.submit_prompt(
                     final_prompt, retries=1
                 )
 
                 if not gemini_result.ok:
+                    self.logger.error(
+                        f"Gemini polish FAILED (Attempt {attempt}): {gemini_result.error_message}"
+                    )
                     if gemini_result.error_type == "quota":
+                        self.logger.critical("GEMINI QUOTA EXCEEDED. Halting assembly.")
                         console.print(
                             f"[{config.error}]GEMINI QUOTA EXCEEDED DURING ASSEMBLY. HALTING ALL OPERATIONS.[/]"
                         )
                         return "failed", "GEMINI QUOTA EXCEEDED"
-                    return (
-                        "failed",
-                        f"FINAL POLISH FAILED: {gemini_result.error_message}",
+
+                    console.print(
+                        f"[{config.warning}]POLISH ATTEMPT {attempt} FAILED: {gemini_result.error_message}[/]"
                     )
+                    if attempt < max_polish_attempts:
+                        continue
+                    else:
+                        # If we failed all attempts with API errors and have no polished_text
+                        if not polished_text:
+                            self.logger.critical(
+                                f"Manuscript Polish FAILED all {max_polish_attempts} attempts due to API errors."
+                            )
+                            return (
+                                "failed",
+                                f"FINAL POLISH FAILED AFTER {max_polish_attempts} ATTEMPTS: {gemini_result.error_message}",
+                            )
+                        # If we have a polished_text from a previous attempt (with low ratio), we'll fall through and use it.
+                        self.logger.warning(
+                            "Using degraded polished text from a previous attempt due to final attempt API error."
+                        )
+                        break
 
                 raw_polished = gemini_result.output.strip()
+                self.logger.debug(
+                    f"Received raw output from Gemini. Length: {len(raw_polished)} chars."
+                )
 
                 # 4. MANUSCRIPT SANITIZATION (Vibe Code)
                 # Extract from markers if present
                 manuscript_match = re.search(
                     r"<<<+(.*?)(?:>>>|\Z)", raw_polished, re.DOTALL
                 )
+                current_polish = (
+                    manuscript_match.group(1).strip()
+                    if manuscript_match
+                    else raw_polished
+                )
                 if manuscript_match:
-                    current_polish = manuscript_match.group(1).strip()
+                    self.logger.debug("Extracted manuscript from markers.")
                 else:
-                    current_polish = raw_polished
+                    self.logger.warning(
+                        "Manuscript markers NOT FOUND in Gemini output. Using raw output."
+                    )
 
                 # Remove LLM Gristle
                 current_polish = re.sub(
@@ -1178,50 +1455,47 @@ class PipelineController:
                 # Validate Word Count
                 polished_word_count = len(current_polish.split())
                 ratio = polished_word_count / original_word_count
+                self.logger.info(
+                    f"Attempt {attempt}: Polished word count: {polished_word_count}, Ratio: {ratio:.2f}"
+                )
+
+                # Update polished_text with the latest result
+                polished_text = current_polish
 
                 if ratio >= 0.95:
-                    polished_text = current_polish
+                    self.logger.info(
+                        f"Manuscript polish SUCCESSFUL on attempt {attempt} (Ratio: {ratio:.2f})."
+                    )
+                    is_failure = False
+                    failure_reason = None
                     console.print(
                         f"[{config.success}]POLISH SUCCESSFUL: {polished_word_count} words (Ratio: {ratio:.2f})[/]"
                     )
                     break
                 else:
+                    is_failure = True
+                    failure_reason = f"Low word count ratio: {ratio:.2f} ({polished_word_count} vs {original_word_count})"
+                    self.logger.warning(
+                        f"Manuscript polish REJECTED (Attempt {attempt}): {failure_reason}"
+                    )
                     console.print(
-                        f"[{config.warning}]POLISH FAILED (Attempt {attempt}): Word count too low ({polished_word_count} vs {original_word_count}, Ratio: {ratio:.2f})[/]"
+                        f"[{config.warning}]POLISH FAILED (Attempt {attempt}): {failure_reason}[/]"
                     )
                     if attempt == max_polish_attempts:
-                        console.print(
-                            f"\n[{config.error}]FINAL MANUSCRIPT FAILED WORD COUNT VALIDATION AFTER {max_polish_attempts} ATTEMPTS.[/]"
+                        self.logger.warning(
+                            f"Final attempt failed word count validation. Storing with is_failure=True."
                         )
-                        console.print(f"[{config.primary}]OPTIONS:[/]")
                         console.print(
-                            f"[{config.success}]1.[/] USE AS-IS (Accept Ratio {ratio:.2f})"
+                            f"\n[{config.warning}]FINAL MANUSCRIPT COMPLETED WITH LOW WORD COUNT AFTER {max_polish_attempts} ATTEMPTS. PROCEEDING AS REQUESTED.[/]"
                         )
-                        console.print(f"[{config.error}]Q.[/] ABORT ASSEMBLY")
-
-                        user_choice = ""
-                        while user_choice not in ["1", "q"]:
-                            user_choice = (
-                                console.input(
-                                    f"\n[{config.secondary}]SELECT RESPONSE > [/]"
-                                )
-                                .strip()
-                                .lower()
-                            )
-
-                        if user_choice == "1":
-                            polished_text = current_polish
-                            break
-                        else:
-                            return (
-                                "failed",
-                                f"MANUSCRIPT REJECTED BY USER DUE TO WORD LOSS ({ratio:.2f})",
-                            )
+                        break
 
         # 5. SAVE MANUSCRIPT
         if not polished_text:
+            self.logger.critical("Final Polish failed to generate any text.")
             return "failed", "FINAL POLISH FAILED: No text generated."
 
+        self.logger.debug("Applying final formatting (indents) to manuscript.")
         # Apply paragraph indents (tabs) for Google Docs compatibility
         # We split by any existing paragraph markers (double or triple newlines)
         # Then we ensure each resulting paragraph is stripped and indented.
@@ -1231,7 +1505,10 @@ class PipelineController:
         ]
         final_manuscript_text = "\n".join(["\t" + p for p in raw_paragraphs])
 
+        self.logger.info("Saving manuscript to job_data and manuscript.txt.")
         job_data.manuscript = final_manuscript_text
+        job_data.manuscript_is_failure = is_failure
+        job_data.manuscript_failure_reason = failure_reason
         self.db.save_job_data(episode_dir, job_data)
 
         # Build the final text file content with Title and Date header
@@ -1257,13 +1534,18 @@ class PipelineController:
         self, episode_dir: Path, job_data: JobData, episode
     ) -> tuple[str, str]:
         """Performs a final quality audit of the manuscript using Ollama."""
+        self.logger.info("Starting final manuscript quality audit.")
         if job_data.manuscript_score is not None:
+            self.logger.info("Manuscript evaluation already exists. Skipping.")
             console.print(
                 f"[{config.info}]MANUSCRIPT EVALUATION ALREADY PERFORMED (SKIPPED)[/]"
             )
             return "success", "MANUSCRIPT EVALUATION ALREADY PERFORMED"
 
         if not job_data.manuscript or not job_data.transcript_txt:
+            self.logger.error(
+                "Manuscript or original transcript missing for evaluation."
+            )
             return (
                 "failed",
                 "EVALUATION FAILED: Manuscript or original transcript missing.",
