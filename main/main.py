@@ -16,15 +16,30 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy import or_
 from pathlib import Path
 from rich.traceback import install
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    BarColumn,
+    TaskProgressColumn,
+    TimeRemainingColumn,
+    DownloadColumn,
+    TransferSpeedColumn,
+)
 import logging
 from logging_config import setup_logging
 from datetime import datetime, timezone
 from transcriptProcessing import GeminiProcessor, OllamaProcessor
 from processor.services.controller import PipelineController
 from processor.services.preflight import PreflightCheck
+from processor.config import config
 
 install(show_locals=True, width=120)
 logger = logging.getLogger(__name__)
+console = Console()
 
 
 # Helper function to get current UTC time
@@ -60,26 +75,45 @@ class PodcastCollection:
         logger.info("Starting standard podcast collection flow...")
         session = SessionLocal()
         try:
-            logger.info("Saving podcast metadata...")
-            podcast_metadata = self.save_podcast_metadata(session)
-            logger.info("Podcast metadata saved.")
+            with console.status(
+                f"[{config.primary}]SYNCING PODCAST METADATA...[/]",
+                spinner=config.spinner_type,
+                spinner_style=config.spinner_color,
+            ):
+                logger.info("Saving podcast metadata...")
+                podcast_metadata = self.save_podcast_metadata(session)
+                logger.info("Podcast metadata saved.")
 
-            logger.info("Beginning method to save RSS URL...")
-            self.save_rss_url(session, podcast_metadata)
-            logger.info("RSS URL saving complete.")
+                logger.info("Beginning method to save RSS URL...")
+                self.save_rss_url(session, podcast_metadata)
+                logger.info("RSS URL saving complete.")
 
             # save episode info in database
-            logger.info("Saving episodes...")
-            for entry in self.podcast_entries:
-                # get intel for this episode
-                episode_info = self.extract_episode_info(entry)
+            with Progress(
+                SpinnerColumn(spinner_name=config.spinner_type, style=config.primary),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(bar_width=None, style="black", complete_style=config.primary),
+                TaskProgressColumn(),
+                console=console,
+                transient=True,
+            ) as progress:
+                task = progress.add_task(
+                    f"[{config.secondary}]CATALOGING EPISODES...[/]",
+                    total=len(self.podcast_entries),
+                )
+                for entry in self.podcast_entries:
+                    # get intel for this episode
+                    episode_info = self.extract_episode_info(entry)
 
-                # save episode info in the database
-                episode_id = self.save_episodes(session, episode_info)
+                    # save episode info in the database
+                    episode_id = self.save_episodes(session, episode_info)
 
-                # build path structure for episode
-                if episode_id:
-                    self.build_episode_paths(session, episode_info, episode_id)
+                    # build path structure for episode
+                    if episode_id:
+                        self.build_episode_paths(session, episode_info, episode_id)
+                    progress.advance(task)
+            
+            console.print(f"[{config.success}]EPISODE CATALOG SYNC COMPLETE.[/]")
             logger.info("Episodes saved in the database.")
         finally:
             session.close()
@@ -191,13 +225,22 @@ class PodcastCollection:
         if oddballs:
             logger.info(f"Found {len(oddballs)} oddball episodes to categorize.")
             for oddball in oddballs:
-                print("\n*********************\n")
+                console.print(
+                    Panel(
+                        f"UNSPECIFIED ASSET DESIGNATION: {oddball}",
+                        title="[bold red]ODDBALL DETECTED[/]",
+                        style=config.warning,
+                        border_style=config.error,
+                    )
+                )
+                
+                table = Table(title="AVAILABLE SECTORS", show_header=False, box=None)
                 for i, season in enumerate(season_names, start=1):
-                    print(f"{i}: {season}")
-                print(f"\nOddball episode title: {oddball}\n")
+                    table.add_row(f"[{config.primary}]{i}.[/] {season}")
+                console.print(table)
 
                 while True:
-                    user_input = input("Enter number or new season name: ").strip()
+                    user_input = console.input(f"\n[{config.secondary}]ASSIGN TO SECTOR (ID or NEW CODE) > [/]").strip()
 
                     if user_input.isdigit():
                         idx = int(user_input) - 1
@@ -208,7 +251,7 @@ class PodcastCollection:
                             )
                             break
                         else:
-                            print("Invalid number. Try again.")
+                            console.print(f"[{config.error}]INVALID SECTOR INDEX. RETRY.[/]")
                     elif user_input:
                         chosen_season = user_input
                         if chosen_season not in season_names:
@@ -222,12 +265,12 @@ class PodcastCollection:
                             )
                         break
                     else:
-                        print("Input cannot be empty. Try again.")
+                        console.print(f"[{config.error}]INPUT REQUIRED. RETRY.[/]")
 
-                print(f"Episode '{oddball}' assigned to season '{chosen_season}'")
+                console.print(f"[{config.success}]ASSET '{oddball}' ASSIGNED TO '{chosen_season}'[/]")
 
         logger.info(f"Identified seasons for saving: {season_names}")
-        input("Press Enter to confirm and save these seasons to the database...")
+        console.input(f"\n[{config.warning}]PRESS ENTER TO CONFIRM SECTOR SYNC TO DATABASE...[/]")
         session = SessionLocal()
         try:
             for season_name in season_names:
@@ -318,18 +361,24 @@ class PodcastCollection:
         logger.warning(
             f"Could not determine season for episode '{title}'. Manual selection required."
         )
-        print("\n*********************\n")
-        print(f"Episode title: {title}\n")
+        console.print(
+            Panel(
+                f"UNIDENTIFIED ASSET: {title}",
+                title="[bold red]MANUAL CLASSIFICATION REQUIRED[/]",
+                style=config.warning,
+                border_style=config.error,
+            )
+        )
         links = episode_info.get("links", [])[0]
-        print(f"Episode link: {links.get('href', 'N/A')}\n")
-        print("Available seasons:")
-
+        console.print(f"[{config.info}]SOURCE LINK: {links.get('href', 'N/A')}[/]")
+        
+        table = Table(title="OPERATIONAL SECTORS", show_header=False, box=None)
         for i, season in enumerate(seasons, start=1):
-            print(f"{i}: {season.code}")
-        print("\n")
+            table.add_row(f"[{config.primary}]{i}.[/] {season.code}")
+        console.print(table)
 
         while True:
-            user_input = input("Enter number for this episode: ").strip()
+            user_input = console.input(f"\n[{config.secondary}]ASSIGN SECTOR ID > [/]").strip()
 
             if user_input.isdigit():
                 idx = int(user_input) - 1
@@ -337,9 +386,9 @@ class PodcastCollection:
                     chosen_season = seasons[idx]
                     break
                 else:
-                    print("Invalid number. Try again.")
+                    console.print(f"[{config.error}]INVALID SECTOR ID. RETRY.[/]")
             else:
-                print("Invalid entry. Please try again...")
+                console.print(f"[{config.error}]NUMERIC INPUT REQUIRED. RETRY.[/]")
 
         logger.info(
             f"User assigned episode '{title}' to season '{chosen_season.code}'."
@@ -468,7 +517,7 @@ class PodcastDownloader:
         finally:
             session.close()
 
-    def download_episode(self, episode):
+    def download_episode(self, episode, progress=None, task_id=None):
         """
         Download a single podcast episode.
         """
@@ -496,17 +545,26 @@ class PodcastDownloader:
                 r.raise_for_status()
                 total_size = int(r.headers.get("content-length", 0))
 
-                with open(file_path, "wb") as f, tqdm(
-                    total=total_size,
-                    unit="iB",
-                    unit_scale=True,
-                    unit_divisor=1024,
-                    desc=episode.title[:40],
-                ) as progress_bar:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        if chunk:
-                            size = f.write(chunk)
-                            progress_bar.update(size)
+                if progress and task_id is not None:
+                    progress.update(task_id, total=total_size, visible=True)
+                    with open(file_path, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                                progress.update(task_id, advance=len(chunk))
+                else:
+                    # Fallback to simple tqdm if no rich progress provided (though we aim to use rich)
+                    with open(file_path, "wb") as f, tqdm(
+                        total=total_size,
+                        unit="iB",
+                        unit_scale=True,
+                        unit_divisor=1024,
+                        desc=episode.title[:40],
+                    ) as progress_bar:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            if chunk:
+                                size = f.write(chunk)
+                                progress_bar.update(size)
 
             downloaded_size = file_path.stat().st_size
             if total_size != 0 and downloaded_size < total_size:
@@ -534,10 +592,31 @@ class PodcastDownloader:
         pending_episodes = self.get_pending_downloads()
 
         if not pending_episodes:
+            console.print(f"[{config.info}]NO PENDING DOWNLOADS DETECTED.[/]")
             logger.info("No episodes are pending download.")
         else:
-            for episode in pending_episodes:
-                self.download_episode(episode)
+            console.print(
+                f"[{config.primary}]INITIATING BATCH DOWNLOAD: {len(pending_episodes)} ASSETS[/]"
+            )
+            with Progress(
+                TextColumn("[bold blue]{task.fields[filename]}", justify="right"),
+                BarColumn(bar_width=None),
+                "[progress.percentage]{task.percentage:>3.1f}%",
+                "•",
+                DownloadColumn(),
+                "•",
+                TransferSpeedColumn(),
+                "•",
+                TimeRemainingColumn(),
+                console=console,
+                transient=True,
+            ) as progress:
+                for episode in pending_episodes:
+                    filename = episode.title[:30] + "..." if len(episode.title) > 30 else episode.title
+                    task_id = progress.add_task("download", filename=filename, start=False)
+                    self.download_episode(episode, progress=progress, task_id=task_id)
+            
+            console.print(f"[{config.success}]BATCH DOWNLOAD OPERATIONS COMPLETE.[/]")
 
 
 class DeployPodcastProcessing:
@@ -1054,20 +1133,36 @@ if __name__ == "__main__":
 
     try:
         while True:
-            logger.info("\n*****Program initiated*****")
-            print("\nSelect an option:")
-            for option in options:
-                print(f"{option}: {options[option]}")
+            console.clear()
+            console.print(
+                Panel(
+                    "TACTICAL PODCAST COMMAND CENTER - MAIN OPERATIONS",
+                    style=config.header,
+                    border_style=config.panel_border,
+                )
+            )
 
-            choice = input("Enter option number: ").strip()
+            menu = Table(show_header=False, box=None)
+            for key, value in options.items():
+                menu.add_row(f"[{config.primary}]{key}.[/] {value.upper()}")
+
+            console.print(menu)
+
+            choice = (
+                console.input(f"\n[{config.secondary}]EXECUTE COMMAND > [/]")
+                .strip()
+                .lower()
+            )
 
             if choice == "1":
                 collector = PodcastCollection(url)
                 collector.standard_flow()
+                console.input(f"\n[{config.info}]PRESS ENTER TO RETURN TO COMMAND CENTER...[/]")
 
             elif choice == "2":
                 downloader = PodcastDownloader()
                 downloader.start_downloads()
+                console.input(f"\n[{config.info}]PRESS ENTER TO RETURN TO COMMAND CENTER...[/]")
 
             elif choice == "3":
                 deployer = DeployPodcastProcessing()

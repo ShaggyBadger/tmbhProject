@@ -28,7 +28,7 @@ from processor.services.analytics import MissionDebrief
 from processor.config import config
 from processor.models import JobData
 from joshlib.gemini import GeminiClient  # Import GeminiClient and GeminiResult
-from joshlib.ollama import OllamaClient  # Import OllamaClient and OllamaResult
+from joshlib.ollama import OllamaClient, OllamaResult  # Import OllamaClient and OllamaResult
 
 console = Console()
 
@@ -61,6 +61,8 @@ class PipelineController:
         self.metadata_llm_type = "ollama"
         self.metadata_llm_client = self.ollama_client
 
+        self.ollama_cooldown_until = 0
+
         self._metadata_fields_to_process = {
             "primary_text": Path(__file__).parent
             / "prompts/metadata/extract-primary-text.txt",
@@ -74,6 +76,52 @@ class PipelineController:
             "takeaways": Path(__file__).parent
             / "prompts/metadata/extract-takeaways.txt",
         }
+
+    def _call_ollama_safe(self, client, prompt, timeout=120):
+        """
+        Executes an Ollama call. 
+        If a cooldown is active, diverts to Gemini.
+        If Ollama fails, initiates a 10-minute cooldown and uses Gemini as fallback.
+        """
+        now = time.time()
+        
+        # Check if we are currently in a cooldown period
+        if now < self.ollama_cooldown_until:
+            remaining = int(self.ollama_cooldown_until - now)
+            self.logger.info(f"OLLAMA COOLDOWN ACTIVE ({remaining}s remaining). DIVERTING TO GEMINI FALLBACK.")
+            # Use Gemini instead
+            res = self.gemini_client.submit_prompt(prompt)
+            # Map GeminiResult to a compatible format (OllamaResult)
+            return OllamaResult(
+                ok=res.ok,
+                output=res.output,
+                error_message=res.error_message
+            )
+
+        try:
+            # Initial Attempt
+            return client.submit_prompt(prompt, timeout=timeout)
+        except Exception as e:
+            self.logger.warning(
+                f"OLLAMA STALL/ERROR DETECTED: {e}. INITIATING GEMINI FALLBACK PROTOCOL (10 minutes)..."
+            )
+            # Set cooldown for 10 minutes
+            self.ollama_cooldown_until = time.time() + 600
+            
+            # Use Gemini for THIS call immediately
+            self.logger.info("EXECUTING CURRENT REQUEST VIA GEMINI EMERGENCY FALLBACK.")
+            res = self.gemini_client.submit_prompt(prompt)
+            return OllamaResult(
+                ok=res.ok,
+                output=res.output,
+                error_message=res.error_message
+            )
+
+    def _get_active_llm_name(self):
+        """Returns the name of the currently active LLM for Ollama-based calls."""
+        if time.time() < self.ollama_cooldown_until:
+            return "GEMINI (FALLBACK)"
+        return "OLLAMA"
 
     def start(self):
         """Entry point for the editing pipeline."""
@@ -1107,10 +1155,11 @@ class PipelineController:
                 # --- MULTI-ATTEMPT LOOP (Max 3 Tries) ---
                 passed = False
                 for attempt in range(1, 4):
-                    self.logger.info(f"Paragraph {i+1}, Attempt {attempt}/3 starting.")
+                    llm_name = self._get_active_llm_name()
+                    self.logger.info(f"Paragraph {i+1}, Attempt {attempt}/3 starting using {llm_name}.")
                     progress.update(
                         task,
-                        description=f"[{config.primary}]PROCESSING SEGMENT {i+1}/{total_paragraphs} (Attempt {attempt})...[/]",
+                        description=f"[{config.primary}]REFINING SEGMENT {i+1}/{total_paragraphs} ({llm_name} - ATT {attempt})...[/]",
                     )
 
                     # 1. EDITING
@@ -1138,7 +1187,8 @@ class PipelineController:
                     self.logger.debug(
                         f"Submitting edit prompt to Ollama (Paragraph {i+1}). Prompt length: {len(final_edit_prompt)} chars."
                     )
-                    edit_result = self.ollama_client.submit_prompt(final_edit_prompt)
+                    
+                    edit_result = self._call_ollama_safe(self.ollama_client, final_edit_prompt)
 
                     if not edit_result.ok or not edit_result.output:
                         self.logger.error(
@@ -1176,7 +1226,6 @@ class PipelineController:
                         f"Sanitized edit for Paragraph {i+1}. Length: {len(sanitized)} chars."
                     )
 
-                    # 2. EVALUATION
                     self.logger.debug(
                         f"Submitting evaluation prompt to Ollama (Paragraph {i+1})."
                     )
@@ -1190,7 +1239,7 @@ class PipelineController:
                         EP=p_dict["edited"],
                     )
 
-                    eval_result = self.eval_client.submit_prompt(eval_prompt)
+                    eval_result = self._call_ollama_safe(self.eval_client, eval_prompt)
 
                     if not eval_result.ok or not eval_result.output:
                         self.logger.error(
@@ -1586,8 +1635,9 @@ class PipelineController:
         # Initialize specialized client for evaluation (llama3.2:3b with high context)
         eval_client = OllamaClient(model="llama3.2:3b", num_ctx=32768)
 
+        llm_name = self._get_active_llm_name()
         with console.status(
-            f"[{config.primary}]AUDITING PIPELINE QUALITY (OLLAMA - LLAMA 3.2:3B)...[/]",
+            f"[{config.primary}]AUDITING PIPELINE QUALITY ({llm_name})...[/]",
             spinner=config.spinner_type,
             spinner_style=config.spinner_color,
         ):
@@ -1596,7 +1646,7 @@ class PipelineController:
                 FINAL_MANUSCRIPT=job_data.manuscript,
             )
 
-            result = eval_client.submit_prompt(final_prompt)
+            result = self._call_ollama_safe(eval_client, final_prompt, timeout=300)
 
             if not result.ok or not result.output:
                 return "failed", f"MANUSCRIPT EVALUATION FAILED: {result.error_message}"
@@ -1805,21 +1855,21 @@ class PipelineController:
             llm_name = "GEMINI"
         else:
             client = self.metadata_llm_client
-            llm_name = self.metadata_llm_type.upper()
+            llm_name = self._get_active_llm_name()
 
         # LLM Call
         with console.status(
-            f"[{config.primary}]EXTRACTING {field_name.upper()} for {episode.title} using {llm_name}...[/]",
+            f"[{config.primary}]EXTRACTING {field_name.upper()} using {llm_name}...[/]",
             spinner=config.spinner_type,
             spinner_style=config.spinner_color,
         ):
             final_prompt = prompt_template.format(TRANSCRIPT_TEXT=source_text)
 
             # Use Gemini-specific call if needed (with retries)
-            if llm_name == "GEMINI":
+            if field_name == "primary_text":
                 llm_result = client.submit_prompt(final_prompt, retries=1)
             else:
-                llm_result = client.submit_prompt(final_prompt)
+                llm_result = self._call_ollama_safe(client, final_prompt)
 
             if not llm_result.ok:
                 if llm_name == "GEMINI" and llm_result.error_type == "quota":
