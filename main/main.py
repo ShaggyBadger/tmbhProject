@@ -648,12 +648,47 @@ class DeployPodcastProcessing:
         self.mp3s_to_deploy = self.find_mp3s()
 
         if not self.mp3s_to_deploy:
+            console.print(f"[{config.info}]NO ASSETS AVAILABLE FOR DEPLOYMENT.[/]")
             logger.info("No MP3 files found for deployment.")
-        else:
-            for episode in self.mp3s_to_deploy:
-                self.deploy_mp3(episode)
+            console.input(
+                f"\n[{config.secondary}]PRESS ENTER TO RETURN TO COMMAND CENTER...[/]"
+            )
+            return
 
-        logger.info("Deployment process complete.")
+        console.print(
+            f"[{config.primary}]PREPARING TO DEPLOY {len(self.mp3s_to_deploy)} MP3'S FOR TRANSCRIPTION[/]"
+        )
+        confirm = (
+            console.input(f"[{config.warning}]PROCEED WITH DEPLOYMENT? (Y/N) > [/]")
+            .strip()
+            .lower()
+        )
+
+        if confirm == "y":
+            with Progress(
+                SpinnerColumn(spinner_name=config.spinner_type, style=config.primary),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(bar_width=None, style="black", complete_style=config.primary),
+                TaskProgressColumn(),
+                console=console,
+                transient=True,
+            ) as progress:
+                task = progress.add_task(
+                    f"[{config.secondary}]DEPLOYING ASSETS...[/]",
+                    total=len(self.mp3s_to_deploy),
+                )
+                for episode in self.mp3s_to_deploy:
+                    self.deploy_mp3(episode)
+                    progress.advance(task)
+
+            console.print(f"[{config.success}]DEPLOYMENT OPERATIONS COMPLETE.[/]")
+            logger.info("Deployment process complete.")
+        else:
+            console.print(f"[{config.error}]DEPLOYMENT ABORTED BY USER.[/]")
+
+        console.input(
+            f"\n[{config.secondary}]PRESS ENTER TO RETURN TO COMMAND CENTER...[/]"
+        )
 
     def find_mp3s(self):
         logger.info("Finding MP3 files to deploy...")
@@ -671,9 +706,6 @@ class DeployPodcastProcessing:
             query = query.order_by(PodcastEpisode.id.asc())
 
             mp3_list = query.all()
-            if mp3_list:
-                logger.info(f"Found {len(mp3_list)} MP3 files to deploy.")
-                input("Press Enter to continue...")
             return mp3_list
         finally:
             session.close()
@@ -767,12 +799,60 @@ class DeployPodcastProcessing:
 class RecoverPodcastTranscripts:
     def __init__(self):
         self.fastapi_url = "http://192.168.68.60:5000"
-        self.ulids_completed = self.query_server_for_completed_jobs()
-        logger.info(f"Found {len(self.ulids_completed)} completed jobs to download.")
 
-        if self.ulids_completed:
-            for ulid in self.ulids_completed:
-                self.download_completed_job(ulid)
+        with console.status(
+            f"[{config.primary}]QUERYING SERVER FOR COMPLETED JOBS...[/]",
+            spinner=config.spinner_type,
+            spinner_style=config.spinner_color,
+        ):
+            self.ulids_completed = self.query_server_for_completed_jobs()
+
+        if not self.ulids_completed:
+            console.print(
+                f"[{config.info}]NO COMPLETED JOBS AVAILABLE FOR RECOVERY.[/]"
+            )
+            logger.info("No completed jobs found on server.")
+            console.input(
+                f"\n[{config.secondary}]PRESS ENTER TO RETURN TO COMMAND CENTER...[/]"
+            )
+            return
+
+        console.print(
+            f"[{config.primary}]FOUND {len(self.ulids_completed)} COMPLETED JOBS READY FOR RECOVERY[/]"
+        )
+        confirm = (
+            console.input(f"[{config.warning}]PROCEED WITH RECOVERY? (Y/N) > [/]")
+            .strip()
+            .lower()
+        )
+
+        if confirm == "y":
+            with Progress(
+                SpinnerColumn(spinner_name=config.spinner_type, style=config.primary),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(bar_width=None, style="black", complete_style=config.primary),
+                TaskProgressColumn(),
+                console=console,
+                transient=True,
+            ) as progress:
+                task = progress.add_task(
+                    f"[{config.secondary}]RECOVERING TRANSCRIPTS...[/]",
+                    total=len(self.ulids_completed),
+                )
+                for ulid in self.ulids_completed:
+                    self.download_completed_job(ulid)
+                    progress.advance(task)
+
+            console.print(f"[{config.success}]RECOVERY OPERATIONS COMPLETE.[/]")
+            logger.info(
+                f"Successfully recovered {len(self.ulids_completed)} transcripts."
+            )
+        else:
+            console.print(f"[{config.error}]RECOVERY ABORTED BY USER.[/]")
+
+        console.input(
+            f"\n[{config.secondary}]PRESS ENTER TO RETURN TO COMMAND CENTER...[/]"
+        )
 
     def check_job_status(self, ulid):
         """just a method to do get requests. Gonna combine with threading probably"""
