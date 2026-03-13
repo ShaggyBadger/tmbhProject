@@ -1779,6 +1779,9 @@ class PipelineController:
 
     def _sanitize_text(self, text: str) -> str:
         """Sanitizes text based on Vibe Code Report guidelines and strips Markdown."""
+        # 0. Remove common editing artifacts (e.g., "REFINED PARAGRAPH: ")
+        text = re.sub(r"^REFINED PARAGRAPH:\s*", "", text)
+
         # 1. Remove Markdown/Structural Gristle
         text = re.sub(r"\*\*|__", "", text)
         text = re.sub(r"[*_]", "", text)
