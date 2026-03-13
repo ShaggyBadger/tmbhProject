@@ -112,7 +112,7 @@ class PodcastCollection:
                     if episode_id:
                         self.build_episode_paths(session, episode_info, episode_id)
                     progress.advance(task)
-            
+
             console.print(f"[{config.success}]EPISODE CATALOG SYNC COMPLETE.[/]")
             logger.info("Episodes saved in the database.")
         finally:
@@ -233,14 +233,16 @@ class PodcastCollection:
                         border_style=config.error,
                     )
                 )
-                
+
                 table = Table(title="AVAILABLE SECTORS", show_header=False, box=None)
                 for i, season in enumerate(season_names, start=1):
                     table.add_row(f"[{config.primary}]{i}.[/] {season}")
                 console.print(table)
 
                 while True:
-                    user_input = console.input(f"\n[{config.secondary}]ASSIGN TO SECTOR (ID or NEW CODE) > [/]").strip()
+                    user_input = console.input(
+                        f"\n[{config.secondary}]ASSIGN TO SECTOR (ID or NEW CODE) > [/]"
+                    ).strip()
 
                     if user_input.isdigit():
                         idx = int(user_input) - 1
@@ -251,7 +253,9 @@ class PodcastCollection:
                             )
                             break
                         else:
-                            console.print(f"[{config.error}]INVALID SECTOR INDEX. RETRY.[/]")
+                            console.print(
+                                f"[{config.error}]INVALID SECTOR INDEX. RETRY.[/]"
+                            )
                     elif user_input:
                         chosen_season = user_input
                         if chosen_season not in season_names:
@@ -267,10 +271,14 @@ class PodcastCollection:
                     else:
                         console.print(f"[{config.error}]INPUT REQUIRED. RETRY.[/]")
 
-                console.print(f"[{config.success}]ASSET '{oddball}' ASSIGNED TO '{chosen_season}'[/]")
+                console.print(
+                    f"[{config.success}]ASSET '{oddball}' ASSIGNED TO '{chosen_season}'[/]"
+                )
 
         logger.info(f"Identified seasons for saving: {season_names}")
-        console.input(f"\n[{config.warning}]PRESS ENTER TO CONFIRM SECTOR SYNC TO DATABASE...[/]")
+        console.input(
+            f"\n[{config.warning}]PRESS ENTER TO CONFIRM SECTOR SYNC TO DATABASE...[/]"
+        )
         session = SessionLocal()
         try:
             for season_name in season_names:
@@ -371,14 +379,16 @@ class PodcastCollection:
         )
         links = episode_info.get("links", [])[0]
         console.print(f"[{config.info}]SOURCE LINK: {links.get('href', 'N/A')}[/]")
-        
+
         table = Table(title="OPERATIONAL SECTORS", show_header=False, box=None)
         for i, season in enumerate(seasons, start=1):
             table.add_row(f"[{config.primary}]{i}.[/] {season.code}")
         console.print(table)
 
         while True:
-            user_input = console.input(f"\n[{config.secondary}]ASSIGN SECTOR ID > [/]").strip()
+            user_input = console.input(
+                f"\n[{config.secondary}]ASSIGN SECTOR ID > [/]"
+            ).strip()
 
             if user_input.isdigit():
                 idx = int(user_input) - 1
@@ -612,10 +622,16 @@ class PodcastDownloader:
                 transient=True,
             ) as progress:
                 for episode in pending_episodes:
-                    filename = episode.title[:30] + "..." if len(episode.title) > 30 else episode.title
-                    task_id = progress.add_task("download", filename=filename, start=False)
+                    filename = (
+                        episode.title[:30] + "..."
+                        if len(episode.title) > 30
+                        else episode.title
+                    )
+                    task_id = progress.add_task(
+                        "download", filename=filename, start=False
+                    )
                     self.download_episode(episode, progress=progress, task_id=task_id)
-            
+
             console.print(f"[{config.success}]BATCH DOWNLOAD OPERATIONS COMPLETE.[/]")
 
 
@@ -1157,12 +1173,16 @@ if __name__ == "__main__":
             if choice == "1":
                 collector = PodcastCollection(url)
                 collector.standard_flow()
-                console.input(f"\n[{config.info}]PRESS ENTER TO RETURN TO COMMAND CENTER...[/]")
+                console.input(
+                    f"\n[{config.info}]PRESS ENTER TO RETURN TO COMMAND CENTER...[/]"
+                )
 
             elif choice == "2":
                 downloader = PodcastDownloader()
                 downloader.start_downloads()
-                console.input(f"\n[{config.info}]PRESS ENTER TO RETURN TO COMMAND CENTER...[/]")
+                console.input(
+                    f"\n[{config.info}]PRESS ENTER TO RETURN TO COMMAND CENTER...[/]"
+                )
 
             elif choice == "3":
                 deployer = DeployPodcastProcessing()

@@ -28,7 +28,10 @@ from processor.services.analytics import MissionDebrief
 from processor.config import config
 from processor.models import JobData
 from joshlib.gemini import GeminiClient  # Import GeminiClient and GeminiResult
-from joshlib.ollama import OllamaClient, OllamaResult  # Import OllamaClient and OllamaResult
+from joshlib.ollama import (
+    OllamaClient,
+    OllamaResult,
+)  # Import OllamaClient and OllamaResult
 
 console = Console()
 
@@ -79,23 +82,23 @@ class PipelineController:
 
     def _call_ollama_safe(self, client, prompt, timeout=120):
         """
-        Executes an Ollama call. 
+        Executes an Ollama call.
         If a cooldown is active, diverts to Gemini.
         If Ollama fails, initiates a 10-minute cooldown and uses Gemini as fallback.
         """
         now = time.time()
-        
+
         # Check if we are currently in a cooldown period
         if now < self.ollama_cooldown_until:
             remaining = int(self.ollama_cooldown_until - now)
-            self.logger.info(f"OLLAMA COOLDOWN ACTIVE ({remaining}s remaining). DIVERTING TO GEMINI FALLBACK.")
+            self.logger.info(
+                f"OLLAMA COOLDOWN ACTIVE ({remaining}s remaining). DIVERTING TO GEMINI FALLBACK."
+            )
             # Use Gemini instead
             res = self.gemini_client.submit_prompt(prompt)
             # Map GeminiResult to a compatible format (OllamaResult)
             return OllamaResult(
-                ok=res.ok,
-                output=res.output,
-                error_message=res.error_message
+                ok=res.ok, output=res.output, error_message=res.error_message
             )
 
         try:
@@ -107,14 +110,12 @@ class PipelineController:
             )
             # Set cooldown for 10 minutes
             self.ollama_cooldown_until = time.time() + 600
-            
+
             # Use Gemini for THIS call immediately
             self.logger.info("EXECUTING CURRENT REQUEST VIA GEMINI EMERGENCY FALLBACK.")
             res = self.gemini_client.submit_prompt(prompt)
             return OllamaResult(
-                ok=res.ok,
-                output=res.output,
-                error_message=res.error_message
+                ok=res.ok, output=res.output, error_message=res.error_message
             )
 
     def _get_active_llm_name(self):
@@ -1156,7 +1157,9 @@ class PipelineController:
                 passed = False
                 for attempt in range(1, 4):
                     llm_name = self._get_active_llm_name()
-                    self.logger.info(f"Paragraph {i+1}, Attempt {attempt}/3 starting using {llm_name}.")
+                    self.logger.info(
+                        f"Paragraph {i+1}, Attempt {attempt}/3 starting using {llm_name}."
+                    )
                     progress.update(
                         task,
                         description=f"[{config.primary}]REFINING SEGMENT {i+1}/{total_paragraphs} ({llm_name} - ATT {attempt})...[/]",
@@ -1187,8 +1190,10 @@ class PipelineController:
                     self.logger.debug(
                         f"Submitting edit prompt to Ollama (Paragraph {i+1}). Prompt length: {len(final_edit_prompt)} chars."
                     )
-                    
-                    edit_result = self._call_ollama_safe(self.ollama_client, final_edit_prompt)
+
+                    edit_result = self._call_ollama_safe(
+                        self.ollama_client, final_edit_prompt
+                    )
 
                     if not edit_result.ok or not edit_result.output:
                         self.logger.error(
