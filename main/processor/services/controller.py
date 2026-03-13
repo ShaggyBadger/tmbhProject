@@ -59,6 +59,9 @@ class PipelineController:
         self.eval_client = OllamaClient(
             model="llama3.2:3b", num_ctx=16384, temperature=0.4
         )
+        self.picker_client = OllamaClient(
+            model="llama3.2:3b", num_ctx=16384, temperature=0.0
+        )
 
         # Metadata defaults to Ollama
         self.metadata_llm_type = "ollama"
@@ -1155,6 +1158,7 @@ class PipelineController:
 
                 # --- MULTI-ATTEMPT LOOP (Max 3 Tries) ---
                 passed = False
+                attempts_this_run = []
                 for attempt in range(1, 4):
                     llm_name = self._get_active_llm_name()
                     self.logger.info(
@@ -1226,7 +1230,6 @@ class PipelineController:
                         )
 
                     sanitized = self._sanitize_text(extracted_edit)
-                    p_dict["edited"] = sanitized
                     self.logger.debug(
                         f"Sanitized edit for Paragraph {i+1}. Length: {len(sanitized)} chars."
                     )
@@ -1241,7 +1244,7 @@ class PipelineController:
                         PREV=p_prev,
                         NEXT=p_next,
                         OG=p_target,
-                        EP=p_dict["edited"],
+                        EP=sanitized,
                     )
 
                     eval_result = self._call_ollama_safe(self.eval_client, eval_prompt)
@@ -1262,13 +1265,24 @@ class PipelineController:
                     self.logger.debug(f"Critique for Paragraph {i+1}: {critique}")
 
                     # Auto-fail Heuristic
-                    if "*" in p_dict["edited"] or "#" in p_dict["edited"]:
+                    if "*" in sanitized or "#" in sanitized:
                         self.logger.warning(
                             f"Paragraph {i+1} AUTO-FAILED: Markdown/Asterisks detected in edit."
                         )
                         score = 1
                         critique = "[AUTO-FAIL: Structural Discipline - Markdown/Asterisks detected.]"
 
+                    # Record this attempt
+                    attempts_this_run.append(
+                        {
+                            "attempt": attempt,
+                            "edit": sanitized,
+                            "score": score,
+                            "critique": critique,
+                        }
+                    )
+
+                    p_dict["edited"] = sanitized
                     p_dict["evaluation_score"] = score
                     p_dict["critique"] = critique
                     self.db.save_job_data(episode_dir, job_data)
@@ -1285,67 +1299,72 @@ class PipelineController:
                             f"Paragraph {i+1} REJECTED with score {score}. Retrying if attempts remain."
                         )
 
-                # --- MANUAL INTERVENTION (If all 3 attempts failed) ---
+                # --- FAILURE RECOVERY (If all 3 attempts failed, use the Picker) ---
                 if not passed:
                     self.logger.warning(
-                        f"Paragraph {i+1} failed all 3 attempts. Entering manual intervention."
+                        f"Paragraph {i+1} failed all 3 attempts. Executing Automated Best-Pick Selection."
                     )
-                    # Pause progress bar to show UI
-                    progress.stop()
-                    console.clear()
-                    console.print(
-                        Panel(
-                            f"TACTICAL ALERT: REFINEMENT FAILURE FOR PARAGRAPH #{i+1}",
-                            style=config.error,
-                            border_style=config.panel_border,
+                    progress.update(
+                        task,
+                        description=f"[{config.warning}]P#{i+1} FAILED 3x. SELECTING BEST ATTEMPT...[/]",
+                    )
+
+                    picker_prompt_path = (
+                        Path(__file__).parent / "prompts/editing/select-best-edit.txt"
+                    )
+                    picker_template = picker_prompt_path.read_text(encoding="utf-8")
+
+                    picker_prompt = picker_template.format(
+                        SPEAKER_TONE=speaker_tone,
+                        ORIGINAL=p_target,
+                        EDIT_1=attempts_this_run[0]["edit"],
+                        EDIT_2=attempts_this_run[1]["edit"],
+                        EDIT_3=attempts_this_run[2]["edit"],
+                    )
+
+                    picker_result = self._call_ollama_safe(
+                        self.picker_client, picker_prompt
+                    )
+
+                    if not picker_result.ok or not picker_result.output:
+                        self.logger.error(
+                            f"Picker FAILED at Paragraph {i+1}: {picker_result.error_message}"
                         )
-                    )
-
-                    table = Table(title="FAILURE LOG", show_header=True, box=None)
-                    table.add_column("METRIC", style=config.primary)
-                    table.add_column("VALUE")
-                    table.add_row("ATTEMPTS", "3 / 3")
-                    table.add_row(
-                        "LAST SCORE",
-                        f"[{config.warning}]{p_dict['evaluation_score']}/10[/]",
-                    )
-                    console.print(table)
-
-                    console.print(f"\n[{config.secondary}]ORIGINAL:[/]\n{p_target}")
-                    console.print(
-                        f"\n[{config.secondary}]LATEST EDIT:[/]\n{p_dict['edited']}"
-                    )
-                    console.print(
-                        f"\n[{config.warning}]LAST CRITIQUE:[/]\n{p_dict['critique']}"
-                    )
-
-                    console.print(f"\n[{config.primary}]OPTIONS:[/]")
-                    console.print(
-                        f"[{config.success}]1.[/] ACCEPT ANYWAY (Set Score to 7)"
-                    )
-                    console.print(
-                        f"[{config.error}]2.[/] LEAVE AS FAILED (Abort Episode)"
-                    )
-
-                    choice = ""
-                    while choice not in ["1", "2"]:
-                        choice = console.input(
-                            f"\n[{config.secondary}]SELECT RESPONSE > [/]"
-                        ).strip()
-
-                    if choice == "1":
-                        p_dict["evaluation_score"] = 7  # Force acceptance
-                        self.db.save_job_data(episode_dir, job_data)
-                        console.print(
-                            f"[{config.success}]ASSET OVERRIDDEN. CONTINUING...[/]"
-                        )
-                        time.sleep(1)
-                        progress.start()
-                    else:
                         return (
                             "failed",
-                            f"PARAGRAPH #{i+1} REJECTED BY USER AFTER 3 ATTEMPTS",
+                            f"PICKER FAILED AT P#{i+1}: {picker_result.error_message}",
                         )
+
+                    # Parse selection (1, 2, or 3)
+                    selection_match = re.search(r"(\d)", picker_result.output)
+                    selection_idx = (
+                        int(selection_match.group(1)) if selection_match else 1
+                    )
+                    # Clamp to 1-3
+                    selection_idx = max(1, min(3, selection_idx))
+
+                    best_attempt = attempts_this_run[selection_idx - 1]
+
+                    self.logger.info(
+                        f"Picker selected attempt #{selection_idx} for Paragraph {i+1}."
+                    )
+
+                    # Update paragraph with the "best" one
+                    p_dict["edited"] = best_attempt["edit"]
+                    p_dict["evaluation_score"] = 7  # Forced pass
+                    p_dict["critique"] = (
+                        f"[AUTOMATED SELECTION FROM FAILED ATTEMPTS. SELECTED ATT #{selection_idx}]"
+                    )
+
+                    # Store the full audit log for manual review
+                    p_dict["failure_recovery"] = {
+                        "original": p_target,
+                        "attempts": attempts_this_run,
+                        "picker_response": picker_result.output,
+                        "selected_attempt": selection_idx,
+                    }
+
+                    self.db.save_job_data(episode_dir, job_data)
 
                 progress.advance(task)
 

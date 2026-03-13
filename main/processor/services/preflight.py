@@ -92,11 +92,29 @@ class PreflightCheck:
         store_table.add_column("VALUE", style=config.primary)
 
         store_table.add_row(
-            "DOWNLOADED AUDIO ASSETS", str(storage_stats.get("audio_files", 0))
+            "TOTAL ASSETS COUNT", str(storage_stats.get("file_count", 0))
         )
         store_table.add_row(
-            "LOCAL PAYLOAD SIZE", storage_stats.get("total_size", "0 B")
+            "TOTAL PAYLOAD SIZE", storage_stats.get("total_size_str", "0 B")
         )
+        store_table.add_row("", "")  # Spacer
+
+        store_table.add_row(f"[{config.primary}]--- BREAKDOWN ---[/]", "")
+        store_table.add_row(
+            "AUDIO (MP3)", storage_stats["breakdown"]["mp3"]["size_str"]
+        )
+        store_table.add_row(
+            "DATA (JSON)", storage_stats["breakdown"]["json"]["size_str"]
+        )
+        store_table.add_row(
+            "MANUSCRIPTS", storage_stats["breakdown"]["manuscript"]["size_str"]
+        )
+        store_table.add_row(
+            "TRANSCRIPTS", storage_stats["breakdown"]["transcript"]["size_str"]
+        )
+        store_table.add_row("OTHER", storage_stats["breakdown"]["other"]["size_str"])
+
+        store_table.add_row("", "")  # Spacer
         store_table.add_row(
             "PODCAST ROOT PATH",
             str(self.podcast_root.relative_to(self.script_dir.parent)),
@@ -165,23 +183,70 @@ class PreflightCheck:
         return stats
 
     def _get_storage_stats(self) -> dict:
-        """Scan the podcast_files directory for intel."""
-        stats = {"audio_files": 0, "total_size": 0}
+        """Scan the podcast_files directory for detailed telemetry."""
+        categories = {
+            "mp3": {"ext": [".mp3"], "size": 0},
+            "json": {"ext": [".json"], "size": 0},
+            "manuscript": {"names": ["manuscript.txt"], "size": 0},
+            "transcript": {"ext": [".txt"], "size": 0},  # Will exclude manuscripts
+            "other": {"size": 0},
+        }
+
+        stats = {"file_count": 0, "total_size": 0, "breakdown": {}}
+
         try:
             if self.podcast_root.exists():
                 for root, dirs, files in os.walk(self.podcast_root):
                     for f in files:
-                        stats["audio_files"] += 1
-                        stats["total_size"] += os.path.getsize(os.path.join(root, f))
+                        file_path = os.path.join(root, f)
+                        file_size = os.path.getsize(file_path)
+                        file_ext = os.path.splitext(f)[1].lower()
 
-            # Format size
-            size_bytes = stats["total_size"]
-            for unit in ["B", "KB", "MB", "GB", "TB"]:
-                if size_bytes < 1024.0:
-                    stats["total_size"] = f"{size_bytes:.2f} {unit}"
-                    break
-                size_bytes /= 1024.0
+                        stats["file_count"] += 1
+                        stats["total_size"] += file_size
+
+                        categorized = False
+                        # 1. Check for specific names (Manuscript)
+                        if f.lower() == "manuscript.txt":
+                            categories["manuscript"]["size"] += file_size
+                            categorized = True
+
+                        # 2. Check by extensions
+                        if not categorized:
+                            if file_ext == ".mp3":
+                                categories["mp3"]["size"] += file_size
+                                categorized = True
+                            elif file_ext == ".json":
+                                categories["json"]["size"] += file_size
+                                categorized = True
+
+                        # 3. Check for transcript (txt but not manuscript)
+                        if not categorized and file_ext == ".txt":
+                            categories["transcript"]["size"] += file_size
+                            categorized = True
+
+                        # 4. Fallback to other
+                        if not categorized:
+                            categories["other"]["size"] += file_size
+
+            # Helper to format sizes
+            def format_size(size_bytes):
+                temp_size = float(size_bytes)
+                for unit in ["B", "KB", "MB", "GB", "TB"]:
+                    if temp_size < 1024.0:
+                        return f"{temp_size:.2f} {unit}"
+                    temp_size /= 1024.0
+                return f"{temp_size:.2f} PB"
+
+            stats["total_size_str"] = format_size(stats["total_size"])
+            for name, data in categories.items():
+                stats["breakdown"][name] = {
+                    "size": data["size"],
+                    "size_str": format_size(data["size"]),
+                }
+
         except Exception as e:
             logger.error(f"Failed to fetch storage stats: {e}")
-            stats["total_size"] = "UNKNOWN"
+            stats["total_size_str"] = "UNKNOWN"
+
         return stats
